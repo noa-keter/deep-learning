@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project data cache (6.88 GB, lives on Google Drive, never committed)
+cache/
+*.npy
+*.npz
+*.pt
+*.pth
