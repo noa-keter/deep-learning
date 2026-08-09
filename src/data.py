@@ -1,11 +1,11 @@
 """
-Data layer for the resolution-bias study: the four equalisation transforms and
-the shard-by-shard cache builder.
+Data layer for the resolution-bias study: the four equalisation transforms, the
+shard-by-shard cache builder, and the per-run arm loader.
 
 This is the only module that touches image bytes. It is importable on a laptop
-with **numpy + Pillow only**: `pyarrow` and `huggingface_hub` are imported lazily
-inside the functions that need them, so `equalize` can be unit-tested without a
-GPU stack.
+with **numpy + Pillow only**: `pyarrow`, `huggingface_hub` and `torch` are
+imported lazily inside the functions that need them, so `equalize` and the
+metadata helpers can be unit-tested without a GPU stack.
 
 Cache layout written by `build_cache`:
 
@@ -21,8 +21,8 @@ anything. `shards/` (on by default) keeps the upstream parquet untouched: the mo
 faithful copy, and the only one that can rebuild the cache offline, but reading one
 image needs pyarrow. `native/` (off by default) stores one blob per shard rather
 than one file per image - a Drive FUSE mount is far slower per-file than per-byte -
-and the offsets recorded in the metadata seek into it. Enabling both stores the
-originals twice.
+and `open_native` seeks into it by the offsets in the metadata, needing only
+Pillow. Enabling both stores the originals twice.
 """
 
 from __future__ import annotations
@@ -36,14 +36,27 @@ import shutil
 import numpy as np
 from PIL import Image
 from pathlib import Path
-from typing import Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, NamedTuple
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, torch is not installed locally
+    from torch import Tensor
 
 __all__ = [
+    "Arm",
+    "GENERATORS",
+    "REAL_TAG",
     "STRATEGIES",
     "Strategy",
     "build_cache",
     "equalize",
+    "export_natives",
+    "load_arm",
+    "load_arm_numpy",
+    "load_meta",
+    "native_bytes",
+    "open_native",
     "row_rng",
+    "shard_paths",
 ]
 
 Strategy = Literal["centre_crop", "random_crop", "rescale", "pad"]
@@ -52,7 +65,37 @@ STRATEGIES: Final[tuple[Strategy, ...]] = ("centre_crop", "random_crop", "rescal
 #: Largest resampling-free common size the dataset admits: BigGAN is 128x128 native.
 CACHE_SIZE_PX: Final[int] = 128
 
+#: The seven generators with rows. `SD14` is a declared class name with zero rows
+#: and is deliberately absent here - never claim eight generators.
+GENERATORS: Final[tuple[str, ...]] = (
+    "ADM",
+    "BigGAN",
+    "GLIDE",
+    "Midjourney",
+    "SD15",
+    "VQDM",
+    "Wukong",
+)
+
+#: Tag this module writes for real rows in `gen_ids`. It is our own label, not a
+#: claim about the dataset: whatever string the dataset uses for real rows is
+#: preserved verbatim in the metadata `.npz`.
+REAL_TAG: Final[str] = "REAL"
+
 DEFAULT_REPO_ID: Final[str] = "TheKernel01/Tiny-GenImage"
+
+#: The real pool is drawn with a *fixed* seed, never the run seed, so that every
+#: cell of the transfer matrix sees byte-identical real images and any difference
+#: between cells is attributable to the generator alone.
+REAL_POOL_SEED: Final[int] = 20260809
+
+TRAIN_PER_CLASS: Final[int] = 2_000
+#: Standard three-way split, with one naming hazard: the *dataset's* split named
+#: `validation` is what we use as the **test** set. Our validation set is carved
+#: out of `train`. So `x_val` never comes from the `validation-*.npy` files.
+VAL_FRACTION: Final[float] = 0.10
+TEST_PER_GENERATOR: Final[int] = 500
+TEST_REAL_N: Final[int] = 500
 
 DECODE_BATCH_ROWS: Final[int] = 64
 IMAGE_COLUMN: Final[str] = "image"
@@ -64,6 +107,37 @@ _BILINEAR: Final = Image.Resampling.BILINEAR
 #: Set at module import, which only helps if this module is imported before
 #: huggingface_hub - see the check in `build_cache`.
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+
+
+class Arm(NamedTuple):
+    """
+    One (strategy, source, seed) run's tensors.
+
+    Standard train/val/test, but read the names carefully: `x_val` is carved out
+    of the *train* split and is the only set allowed to influence training, while
+    `x_test` comes from the split the dataset calls `validation`. See VAL_FRACTION.
+
+    Fields:
+        x_train: uint8 (n_train, 128, 128, 3) - 90 % of the arm's training set.
+        y_train: float32 (n_train,) - 1.0 synthetic, 0.0 real.
+        x_val: uint8 - the internal 10 %, source generator only, used for
+            checkpoint selection and nothing else.
+        y_val: float32.
+        x_test: uint8 (4000, 128, 128, 3) - seven 500-image generator blocks from
+            the dataset's `validation` split, then the fixed 500-image real block.
+            Never seen until training is over; every reported number comes from here.
+        y_test: float32.
+        gen_ids: str array (4000,) - the generator of each test row, REAL_TAG for
+            the real block. One matrix cell is `gen_ids == g` plus `gen_ids == REAL_TAG`.
+    """
+
+    x_train: Tensor
+    y_train: Tensor
+    x_val: Tensor
+    y_val: Tensor
+    x_test: Tensor
+    y_test: Tensor
+    gen_ids: np.ndarray
 
 
 # --------------------------------------------------------------------------- #
@@ -560,6 +634,463 @@ def _write_class_names(out_root: Path, names: dict[str, list[str] | None]) -> No
     if path.exists():
         return
     path.write_text(json.dumps(names, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- #
+# Cache reading
+# --------------------------------------------------------------------------- #
+
+
+def shard_paths(cache_dir: str | Path, strategy: Strategy, split: str) -> list[Path]:
+    """
+    List a split's cached shards for one strategy, in stable order.
+
+    Args:
+        cache_dir: Cache root.
+        strategy: One of STRATEGIES.
+        split: Split name.
+
+    Returns:
+        Sorted list of .npy paths.
+
+    Raises:
+        FileNotFoundError: If nothing is cached for that split and strategy.
+    """
+    paths = sorted((Path(cache_dir) / strategy).glob(f"{split}-*.npy"))
+    if not paths:
+        raise FileNotFoundError(f"no cached shards for {split}/{strategy} under {cache_dir}")
+    return paths
+
+
+def load_meta(cache_dir: str | Path, split: str) -> dict[str, np.ndarray]:
+    """
+    Concatenate a split's metadata across shards.
+
+    This is all `baseline.py` needs - the dimension rule never touches pixels.
+
+    Args:
+        cache_dir: Cache root.
+        split: Split name.
+
+    Returns:
+        {"h", "w", "label", "generator", "shard"} as parallel arrays, row order
+        matching the cached .npy files concatenated in the same shard order. If
+        the cache was built with `keep_native`, also "native_offset",
+        "native_nbytes" and "native_format" - shard-local byte offsets into
+        `native/<shard>.bin`, which is why "shard" is needed to read them.
+
+    Raises:
+        FileNotFoundError: If no metadata shards exist for that split.
+    """
+    paths = sorted((Path(cache_dir) / "meta").glob(f"{split}-*.npz"))
+    if not paths:
+        raise FileNotFoundError(f"no metadata shards for {split} under {cache_dir}")
+    required = ("h", "w", "label", "generator")
+    optional = ("native_offset", "native_nbytes", "native_format")
+    parts: dict[str, list[np.ndarray]] = {k: [] for k in (*required, "shard")}
+    for index, path in enumerate(paths):
+        with np.load(path, allow_pickle=False) as npz:
+            for key in required:
+                parts[key].append(npz[key])
+            # Present only for caches built with keep_native; all shards agree,
+            # since a split is always built by one call.
+            for key in optional:
+                if key in npz.files:
+                    parts.setdefault(key, []).append(npz[key])
+            parts["shard"].append(np.full(len(npz["h"]), index, np.int32))
+    return {key: np.concatenate(value) for key, value in parts.items()}
+
+
+def native_bytes(cache_dir: str | Path, split: str, row: int, meta: dict | None = None) -> bytes:
+    """
+    Read one row's original encoded image back out of the native archive.
+
+    The bytes are exactly what the dataset shipped - the same file, not a
+    re-encode - so hashes, EXIF and compression structure all survive.
+
+    Args:
+        cache_dir: Cache root.
+        split: Split name.
+        row: Global row index within the split, matching :func:`load_meta` order.
+        meta: Output of :func:`load_meta`, to avoid re-reading it in a loop.
+
+    Returns:
+        The encoded image file's bytes.
+
+    Raises:
+        FileNotFoundError: If the cache was built without `keep_native`.
+    """
+    root = Path(cache_dir)
+    meta = load_meta(root, split) if meta is None else meta
+    if "native_offset" not in meta:
+        raise FileNotFoundError(
+            f"no native archive for {split} under {root} - built with keep_native=False"
+        )
+    shard = int(meta["shard"][row])
+    blobs = sorted((root / "native").glob(f"{split}-*.bin"))
+    with blobs[shard].open("rb") as handle:
+        handle.seek(int(meta["native_offset"][row]))
+        return handle.read(int(meta["native_nbytes"][row]))
+
+
+def open_native(cache_dir: str | Path, split: str, row: int, meta: dict | None = None):
+    """
+    Open one row's original image at native resolution.
+
+    Use this for figures that need the real thing - the deck's "the size alone
+    tells you" slide, or any side-by-side against a 128x128 cached crop.
+
+    Args:
+        cache_dir: Cache root.
+        split: Split name.
+        row: Global row index within the split.
+        meta: Output of :func:`load_meta`, to avoid re-reading it in a loop.
+
+    Returns:
+        An open PIL image at its original size.
+    """
+    return Image.open(io.BytesIO(native_bytes(cache_dir, split, row, meta)))
+
+
+def export_natives(
+    cache_dir: str | Path,
+    split: str,
+    out_dir: str | Path,
+    rows: np.ndarray | list[int],
+) -> list[Path]:
+    """
+    Write selected originals out as ordinary image files, for browsing.
+
+    The archive is one blob per shard, which is right for Drive but not for
+    flicking through in a file manager. This unpacks a chosen subset.
+
+    Args:
+        cache_dir: Cache root.
+        split: Split name.
+        out_dir: Directory to write into; created if absent.
+        rows: Global row indices to export.
+
+    Returns:
+        The written paths, in the order given.
+    """
+    root = Path(cache_dir)
+    meta = load_meta(root, split)
+    target = Path(out_dir)
+    target.mkdir(parents=True, exist_ok=True)
+
+    written: list[Path] = []
+    for row in rows:
+        row = int(row)
+        suffix = str(meta["native_format"][row]).lower() or "bin"
+        path = target / f"{split}-{row:06d}-{meta['generator'][row]}.{suffix}"
+        path.write_bytes(native_bytes(root, split, row, meta))
+        written.append(path)
+    return written
+
+
+def _real_mask(generator: np.ndarray) -> np.ndarray:
+    """
+    Split rows into real and fake by generator tag, refusing to guess.
+
+    Fake rows are those whose generator tag is in GENERATORS. Everything else is
+    real - but only if there is exactly one such tag. More than one unknown tag
+    means the tags are not what this module expects (a renamed generator would
+    otherwise be silently counted as real, which would corrupt every cell), so it
+    raises instead.
+
+    Args:
+        generator: Per-row generator tags.
+
+    Returns:
+        Boolean mask, True for real rows.
+
+    Raises:
+        ValueError: If the tag vocabulary is not GENERATORS plus exactly one
+            real tag, or if no generator tag is present at all.
+    """
+    tags = set(np.unique(generator).tolist())
+    fake_tags = tags & set(GENERATORS)
+    other_tags = sorted(tags - set(GENERATORS))
+    if not fake_tags:
+        raise ValueError(f"no known generator tags in cache; found {sorted(tags)}")
+    if len(other_tags) != 1:
+        raise ValueError(
+            f"expected exactly one real tag besides {GENERATORS}, found {other_tags}"
+        )
+    return generator == other_tags[0]
+
+
+def _check_label_agrees(label: np.ndarray, is_real: np.ndarray) -> None:
+    """
+    Verify the stored `label` column is a function of real-vs-fake.
+
+    Cheap integrity check on metadata only; catches a swapped or misread column
+    before 28 runs are committed to it.
+
+    Args:
+        label: Per-row label strings.
+        is_real: Boolean mask from :func:`_real_mask`.
+
+    Raises:
+        ValueError: If either class carries more than one label value, or both
+            classes carry the same value.
+    """
+    real_labels = set(np.unique(label[is_real]).tolist())
+    fake_labels = set(np.unique(label[~is_real]).tolist())
+    if len(real_labels) != 1 or len(fake_labels) != 1:
+        raise ValueError(f"label is not constant per class: real={real_labels}, fake={fake_labels}")
+    if real_labels == fake_labels:
+        raise ValueError(f"real and fake share label {real_labels}; the column is uninformative")
+
+
+def _gather(cache_dir: Path, strategy: Strategy, split: str, meta: dict, rows: np.ndarray) -> np.ndarray:
+    """
+    Read selected rows out of a split's cached shards without loading all of them.
+
+    Shards are memory-mapped and only the requested rows are materialised - an
+    arm is 4,000 of 28,000 rows, so this reads ~200 MB instead of 1.4 GB.
+
+    Args:
+        cache_dir: Cache root.
+        strategy: One of STRATEGIES.
+        split: Split name.
+        meta: Output of :func:`load_meta` for that split.
+        rows: Global row indices to gather, in the order wanted.
+
+    Returns:
+        uint8 (len(rows), 128, 128, 3).
+    """
+    paths = shard_paths(cache_dir, strategy, split)
+    shard_of = meta["shard"]
+    starts = np.zeros(len(paths), np.int64)
+    counts = np.bincount(shard_of, minlength=len(paths))
+    starts[1:] = np.cumsum(counts)[:-1]
+
+    out: np.ndarray | None = None
+    for shard_index, path in enumerate(paths):
+        wanted = np.flatnonzero(shard_of[rows] == shard_index)
+        if wanted.size == 0:
+            continue
+        memmap = np.load(path, mmap_mode="r")
+        local_rows = rows[wanted] - starts[shard_index]
+        block = np.asarray(memmap[local_rows])
+        if out is None:
+            out = np.empty((len(rows), *block.shape[1:]), np.uint8)
+        out[wanted] = block
+        del memmap
+    if out is None:
+        raise ValueError("no rows selected")
+    return out
+
+
+def _choose(pool: np.ndarray, n: int, seed: int, what: str) -> np.ndarray:
+    """
+    Pick n rows from a pool without replacement, deterministically.
+
+    Args:
+        pool: Candidate global row indices.
+        n: How many to take.
+        seed: RNG seed.
+        what: Human-readable description, used in the error message.
+
+    Returns:
+        Sorted selection of n indices.
+
+    Raises:
+        ValueError: If the pool is smaller than n. A silent shortfall would
+            unbalance the classes and quietly invalidate accuracy.
+    """
+    if len(pool) < n:
+        raise ValueError(f"{what}: need {n} rows, cache has {len(pool)}")
+    picked = np.random.default_rng(seed).choice(pool, size=n, replace=False)
+    return np.sort(picked)
+
+
+def _tag_array(tag: str, n: int) -> np.ndarray:
+    """
+    Build an n-long array of one repeated tag, at full string width.
+
+    Deliberately not `np.full(n, tag, dtype=np.str_)`: that allocates `<U1` from
+    the dtype before looking at the fill value and silently truncates every tag
+    to its first character, which would mark the whole eval set as synthetic.
+
+    Args:
+        tag: The string to repeat.
+        n: Length.
+
+    Returns:
+        A unicode array of width len(tag).
+    """
+    return np.array([tag] * n, dtype=np.str_)
+
+
+def load_arm_numpy(
+    cache_dir: str | Path,
+    strategy: Strategy,
+    source: str,
+    seed: int = 0,
+    train_per_class: int = TRAIN_PER_CLASS,
+    train_split: str = "train",
+    test_split: str = "validation",
+) -> tuple[np.ndarray, ...]:
+    """
+    Build one arm as numpy arrays - the torch-free core of :func:`load_arm`.
+
+    Train: `train_per_class` fakes from `source` plus the same number of real
+    images, the real pool drawn with REAL_POOL_SEED so it is identical in every
+    cell. VAL_FRACTION of it is split off, stratified by class and shuffled with
+    the run `seed`, for checkpoint selection only.
+
+    Test: TEST_PER_GENERATOR fakes for each of the seven generators, then a fixed
+    TEST_REAL_N real block shared by all seven cells. It never influences model
+    selection - that is what the validation carve-out above is for.
+
+    Args:
+        cache_dir: Cache root.
+        strategy: One of STRATEGIES.
+        source: Generator the detector is trained on; must be in GENERATORS.
+        seed: Run seed; controls only the train/val split and its shuffle.
+        train_per_class: Training images per class - halve it if the calibration
+            run comes in slow.
+        train_split: Dataset split to train from.
+        test_split: Dataset split the reported numbers come from. Its default is
+            the string `"validation"` because that is what this dataset calls its
+            held-out split; it is our test set, not our validation set.
+
+    Returns:
+        (x_train, y_train, x_val, y_val, x_test, y_test, gen_ids).
+
+    Raises:
+        ValueError: If `source` is not a known generator, or the cache's tags or
+            labels fail their consistency checks.
+    """
+    if source not in GENERATORS:
+        raise ValueError(f"unknown source {source!r}; expected one of {GENERATORS}")
+    root = Path(cache_dir)
+
+    train_meta = load_meta(root, train_split)
+    train_real = _real_mask(train_meta["generator"])
+    _check_label_agrees(train_meta["label"], train_real)
+
+    fake_rows = _choose(
+        np.flatnonzero(train_meta["generator"] == source),
+        train_per_class,
+        REAL_POOL_SEED,
+        f"train fakes for {source}",
+    )
+    real_rows = _choose(
+        np.flatnonzero(train_real), train_per_class, REAL_POOL_SEED, "train real pool"
+    )
+
+    x_fit = _gather(root, strategy, train_split, train_meta, np.concatenate([fake_rows, real_rows]))
+    y_fit = np.concatenate(
+        [np.ones(len(fake_rows), np.float32), np.zeros(len(real_rows), np.float32)]
+    )
+
+    rng = np.random.default_rng(seed)
+    keep: list[np.ndarray] = []
+    held: list[np.ndarray] = []
+    for value in (1.0, 0.0):
+        idx = np.flatnonzero(y_fit == value)
+        rng.shuffle(idx)
+        cut = int(round(len(idx) * VAL_FRACTION))
+        held.append(idx[:cut])
+        keep.append(idx[cut:])
+    keep_idx = np.concatenate(keep)
+    val_idx = np.concatenate(held)
+    rng.shuffle(keep_idx)
+    rng.shuffle(val_idx)
+
+    test_meta = load_meta(root, test_split)
+    test_real = _real_mask(test_meta["generator"])
+    _check_label_agrees(test_meta["label"], test_real)
+
+    test_rows: list[np.ndarray] = []
+    gen_ids: list[np.ndarray] = []
+    for generator in GENERATORS:
+        rows = _choose(
+            np.flatnonzero(test_meta["generator"] == generator),
+            TEST_PER_GENERATOR,
+            REAL_POOL_SEED,
+            f"test fakes for {generator}",
+        )
+        test_rows.append(rows)
+        gen_ids.append(_tag_array(generator, len(rows)))
+    real_test = _choose(np.flatnonzero(test_real), TEST_REAL_N, REAL_POOL_SEED, "test real block")
+    test_rows.append(real_test)
+    gen_ids.append(_tag_array(REAL_TAG, len(real_test)))
+
+    test_index = np.concatenate(test_rows)
+    x_test = _gather(root, strategy, test_split, test_meta, test_index)
+    ids = np.concatenate(gen_ids)
+    y_test = (ids != REAL_TAG).astype(np.float32)
+
+    return (
+        x_fit[keep_idx],
+        y_fit[keep_idx],
+        x_fit[val_idx],
+        y_fit[val_idx],
+        x_test,
+        y_test,
+        ids,
+    )
+
+
+def load_arm(
+    cache_dir: str | Path,
+    strategy: Strategy,
+    source: str,
+    seed: int = 0,
+    device: str = "cpu",
+    train_per_class: int = TRAIN_PER_CLASS,
+) -> Arm:
+    """
+    Load one (strategy, source, seed) arm as torch tensors.
+
+    Images stay uint8 and NHWC; `train.py` moves them to the GPU once and does the
+    permute/normalise per batch. The whole arm is ~390 MB, small enough to live in
+    T4 VRAM, which is why there is no DataLoader anywhere in this project.
+
+    torch is imported inside this function on purpose: every other function in
+    this module runs on the laptop with numpy + Pillow only.
+
+    Args:
+        cache_dir: Cache root.
+        strategy: One of STRATEGIES.
+        source: Generator to train on.
+        seed: Run seed.
+        device: Destination device for the tensors.
+        train_per_class: Training images per class.
+
+    Returns:
+        An :class:`Arm`.
+    """
+    import torch
+
+    x_train, y_train, x_val, y_val, x_test, y_test, gen_ids = load_arm_numpy(
+        cache_dir, strategy, source, seed, train_per_class=train_per_class
+    )
+    def to_device(array: np.ndarray) -> Tensor:
+        """
+        Move one array to the target device without copying twice.
+
+        Args:
+            array: Source array.
+
+        Returns:
+            The tensor on `device`.
+        """
+        return torch.from_numpy(np.ascontiguousarray(array)).to(device)
+
+    return Arm(
+        x_train=to_device(x_train),
+        y_train=to_device(y_train),
+        x_val=to_device(x_val),
+        y_val=to_device(y_val),
+        x_test=to_device(x_test),
+        y_test=to_device(y_test),
+        gen_ids=gen_ids,
+    )
 
 
 def _main() -> None:
