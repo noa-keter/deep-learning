@@ -1,0 +1,8 @@
+torch
+numpy
+pillow
+pyarrow
+huggingface_hub
+hf_transfer
+matplotlib
+scipy
