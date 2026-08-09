@@ -1,306 +1,334 @@
 # Schedule — Resolution Bias and Cross-Generator Detection of AI-Generated Images
 
-Ordered by **time**, not by topic. Reference plan (full code snippets, exact transform definitions,
-report structure) lives in the course folder:
+**Requirements come first. The date comes second.** Target is Tue 11 Aug 2026 inclusive — but it is
+self-imposed, there is no formal course deadline, and the project is **80 % of the grade**. So the
+rule is: *if something has to give, the date gives, not a requirement.*
+
+Reference plan (full code snippets, exact transform definitions, report structure):
 `OneDrive\...\למידה עמוקה\חומרים לnotebookLM\PROJECT_PLAN.md`. This file is the running order.
 
-`T+` figures are **cumulative hands-on hours** for the pair. Deadlines are unknown, so nothing is
-dated. Two people, two Colab accounts: **I** = Ido, **N** = Noa.
+**I** = Ido, **N** = Noa. Two Colab accounts.
 
 ---
 
-## The critical path, in one line
+## Requirements audit — what the spec demands and where this plan delivers it
 
-```
-data.py  →  cache build (long, unattended)  →  84 GPU runs  →  analysis  →  report
-```
+Spec: `_kb/course/project-spec.md`, from `הנחיות לפרויקט בקורס למידה עמוקה 2026ב`.
+**The R-numbers below are internal labels for this table only. Never cite them in the report, the
+deck, or to a grader — the instructions PDF has no numbered requirements.** Quote the Hebrew.
 
-**Only `data.py` blocks the long pole.** Everything else — model, training loop, baseline, figures —
-either runs in parallel with the build or comes after it. So the schedule below writes `data.py`
-first and writes nothing else until the build is launched.
+| Requirement | Delivered by | Status |
+|---|---|---|
+| PyTorch | `CompactCNN`, trained from scratch | ✅ |
+| Substantive training of a deep model | 56–70 training runs from scratch | ✅ |
+| Clear baseline | Dimension rule, two variants, reported per 7×7 cell | ✅ |
+| Appropriate metrics | Per-cell accuracy (classes exactly balanced) + binomial SE ±1.6 pp | ✅ |
+| `השוואה בין שיטות/מודלים` — comparison between methods **or** models | Four equalisation strategies, compared across the full 7×7 grid, plus the baseline | ✅ |
+| Deep analysis | Ranking + Spearman ρ + attribution + spectra, **≥2 seeds** | ✅ |
+| Reproducibility: organised code, run instructions | README phase, fixed seeds, one-command reproduction | ✅ |
+| Public repo link in the report | This repo, public | ✅ |
+| Per-member contribution breakdown | Report section, drafted as work happens | ✅ |
+
+### On the comparison bullet — one architecture is enough
+
+The Hebrew is `השוואה בין שיטות/מודלים` — a **slash, not "and"**. Comparing methods *or* models
+satisfies it. The four equalisation strategies, compared across the full 7×7 grid against a common
+baseline, are a comparison between methods. **No second architecture is needed, and none is planned.**
+
+The single architecture is also the methodologically correct choice here: the study's claim is about
+what preprocessing does to cross-generator transfer, and holding the model fixed is what isolates
+that. Adding a second architecture would spend GPU hours widening the design rather than deepening it.
+
+### Two decisions that follow from "requirements first"
+
+1. **Two seeds minimum, not one.** This rests on the *separate* `ניתוח מעמיק` bullet, not on the
+   comparison bullet, so it stands regardless of the above. The headline claim is a *ranking change
+   across strategies*, and a ranking from a single seed is not defensible against ±1.6 pp per-cell
+   noise. Third seed if time.
+2. **The build launches tonight.** It is the only multi-hour unattended step; a day spent
+   not-building cannot be recovered.
+
+Never cut, in any scenario: the four equalisation arms · spectra + attribution · training from
+scratch · the baseline · ≥2 seeds · the contribution breakdown · the repo and README.
 
 ---
 
-# T+0 — Fire the slow things now (30 min, both, today)
-
-These are zero-effort and long-latency. Every hour they are not started is an hour added to the end
-of the project. Do them before opening an editor.
-
-| # | Do | Who | Why now |
-|---|---|---|---|
-| 1 | **Ask the course staff for the report and presentation deadlines.** | I | Latency is days, and the answer can change the whole plan (see cut ladder). Oldest unanswered question on the project. |
-| 2 | **Check free Google Drive space on both accounts — need ≥ 8 GB.** | I + N | 2-minute check that prevents the cache build dying at hour 3 with the disk full. |
-| 3 | **Open Colab on both accounts, confirm a T4 is actually assigned.** | I + N | Free-tier T4 availability varies. If an account only gets CPU, the run split has to change *before* runs are scheduled, not during. |
-| 4 | **Push the repo skeleton, make it public, add Noa as collaborator.** | I | Gates *all* of Noa's work. Until this exists she cannot start anything. |
-
-Skeleton to push (`C:\GitHub\TAU_repos\deep-learning`):
+## Critical path
 
 ```
-src/{data,model,train,baseline,analyze}.py   # empty stubs
+data.py  →  cache build  →  56 runs  →  figures  →  report
+   2h          3h (idle)      4h         3h         5h
+```
+
+Only `data.py` blocks the build. Everything else runs alongside it or after.
+
+---
+
+# 🌙 TONIGHT — Sun 9 Aug (~4 h) — the whole point is to launch the build before sleeping
+
+### 0. Setup (30 min, both) — do this before opening an editor
+
+| # | Do | Who |
+|---|---|---|
+| 1 | Check Google Drive free space, both accounts — **need ≥ 8 GB** | I + N |
+| 2 | Open Colab on both accounts, confirm a **T4 is actually assigned** | I + N |
+| 3 | Push the repo skeleton, make it **public**, add Noa as collaborator | I |
+
+Item 2 is not optional: free-tier T4 availability varies, and if one account is CPU-only the run
+split has to change tonight, not on Monday afternoon.
+
+Skeleton (`C:\GitHub\TAU_repos\deep-learning`):
+
+```
+src/{data,model,train,baseline,analyze}.py
 notebooks/{00_build_cache,01_run_matrix}.ipynb
 results/{runs,figures}/.gitkeep
-docs/                                        # copy of the submitted proposal PDF + md
-requirements.txt   README.md   PLAN.md
+docs/                          # copy of the submitted proposal PDF + md
+requirements.txt  README.md  PLAN.md
 ```
 
-Append to `.gitignore`: `cache/`, `*.npy`, `*.pt`, `*.pth`
-
 `requirements.txt`: `torch numpy pillow pyarrow huggingface_hub hf_transfer matplotlib scipy`
+`.gitignore` already has `cache/ *.npy *.npz *.pt *.pth`.
 
-> **Local torch is optional.** Try `pip install torch --index-url https://download.pytorch.org/whl/cpu`
-> once. Python here is 3.13.3; if no wheel resolves, do not fight it. The laptop only needs `numpy`
-> and `Pillow` for the baseline, the spectra and every figure. All torch work happens in Colab.
+> **Skip local torch.** Try `pip install torch --index-url https://download.pytorch.org/whl/cpu` once;
+> Python here is 3.13.3 and if no wheel resolves, **do not spend deadline hours on it.** The laptop
+> needs only `numpy` + `Pillow` (already installed) for the baseline, the spectra and every figure.
+> All torch work happens in Colab.
 
-**Done when:** Noa can clone the repo, both accounts show a T4, both have ≥ 8 GB Drive free, and the
-deadline question has been sent.
+### 1. `src/data.py` (2 h, I) — write nothing else
 
----
+**`equalize(img, strategy) -> uint8[128,128,3]`**
 
-# T+0.5 → T+2.5 — `src/data.py` — the only thing on the critical path (2 h, I)
+| Strategy | Definition | Resampling? |
+|---|---|---|
+| `centre_crop` | Central 128×128 window of the native image | **No** |
+| `random_crop` | 128×128 window at a random top-left, drawn **once per image**, RNG seeded by row index | **No** |
+| `rescale` | `img.resize((128,128), BILINEAR)` — aspect-distorting | Yes |
+| `pad` | Long side → 128 preserving aspect (BILINEAR), zero-pad symmetrically | Yes, plus a hard border |
 
-Write nothing else during this block. Every hour of delay here is an hour the cache is not building.
+**`build_cache(split, out_dir)`** — shard loop: `hf_hub_download` one parquet shard → decode each row
+**once** → emit all four strategies from that single decode → write four per-shard `.npy` + one
+`.npz` of metadata (`h`, `w`, `label`, `generator`) → `os.remove(shard)` → touch `.done`.
+Re-running skips shards with a marker. ~440 MB peak local disk, resumable at shard granularity.
 
-Three pieces:
+**`load_arm(cache_dir, strategy, source, seed)`** — train/eval uint8 tensors for one run.
 
-1. **`equalize(img, strategy) -> uint8[128,128,3]`** — the four strategies. This is the load-bearing
-   part of the whole project; get the definitions written down before any other code.
+Set `HF_HUB_ENABLE_HF_TRANSFER=1`, `pip install -q hf_transfer`.
 
-   | Strategy | Definition | Resampling? |
-   |---|---|---|
-   | `centre_crop` | Central 128×128 window of the native image. | **No** |
-   | `random_crop` | 128×128 window at a random top-left, drawn **once per image**, RNG seeded by row index. | **No** |
-   | `rescale` | `img.resize((128,128), BILINEAR)` — aspect-distorting. | Yes |
-   | `pad` | Long side → 128 preserving aspect (BILINEAR), then zero-pad symmetrically. | Yes, plus a hard border |
+### 2. Pilot: 2 shards, then verify (30 min, I) — **do not skip**
 
-2. **`build_cache(split, out_dir)`** — shard loop: `hf_hub_download` one parquet shard → decode each
-   row **once** → emit all four strategies from that single decode → write four per-shard `.npy` +
-   one `.npz` of metadata (`h`, `w`, `label`, `generator`) → `os.remove(shard)` → touch `.done`.
-   Re-running skips shards with a marker. Resumable at ~440 MB granularity, ~440 MB peak local disk.
+A BGR swap or transposed axis costs 5 minutes here and 3 hours plus 28 poisoned runs if found later.
 
-3. **`load_arm(cache_dir, strategy, source, seed)`** — returns the train/eval uint8 tensors for one
-   run. Called by `train.py`.
+- Row counts and split sizes match the shard header
+- Native sizes match: ADM/GLIDE/VQDM 256², BigGAN 128², SD15/Wukong 512², Midjourney 1024², real varies
+- `SD14` present as a label with **zero** rows — assert it, never claim eight generators
+- **Spot-render 3 images per generator per strategy in a grid and look at them**
 
-Set `HF_HUB_ENABLE_HF_TRANSFER=1` and `pip install -q hf_transfer` in the notebook.
+### 3. 🚀 LAUNCH THE FULL BUILD, then go to sleep (2–3 h wall, unattended)
 
-**Done when:** `equalize` has unit-checkable output shapes for a 128², a 256², a 1024² and a
-500×375 input, and the shard loop runs end-to-end on **one** shard.
-
----
-
-# T+2.5 → T+3.0 — Pilot build: 2 shards, then verify (30 min, I, Colab)
-
-**Do not launch the full build yet.** Build two shards, then run the verification gate below. A BGR
-swap or a transposed axis costs 5 minutes here and 3 hours plus 84 poisoned runs if it is found later.
-
-Verification (all five, plus the eyeball — this project has already been burned once by
-characterising a dataset from a prefix):
-
-- Row count and split sizes match the shard header.
-- Labels present in both classes.
-- Native sizes match the known map: ADM/GLIDE/VQDM 256², BigGAN 128², SD15/Wukong 512²,
-  Midjourney 1024², real variable.
-- `SD14` appears as a label with **zero** rows. Assert it. Never claim eight generators.
-- **Spot-render 3 images per generator per strategy in a grid and look at them.**
-
-**Done when:** the grid looks like photographs, right way up, correct colour.
-
----
-
-# T+3.0 — 🚀 LAUNCH THE FULL CACHE BUILD, then walk away (2–3 h wall, unattended)
-
-This is the long pole. Once it is running, it needs no attention, and everything below happens
-while it runs.
-
-Order matters: **build `validation` first (4 shards, ~25 % of the work), then `train`.**
-The val split is where every reported cell comes from, and it carries the metadata the baseline
-needs — so finishing it first unblocks Noa roughly an hour earlier.
+**Validation split first (4 shards, ~25 % of the work), then train.** Val is where every reported
+cell comes from and it carries the metadata the baseline needs — finishing it first lets Noa start
+in the morning without waiting.
 
 Writes to `/content/drive/MyDrive/aidet/cache/<strategy>/<split>-<shard>.npy` and
 `/content/drive/MyDrive/aidet/meta/<split>-<shard>.npz`.
+Output: four uint8 arrays of `(35000,128,128,3)` = 1.72 GB each, **6.88 GB total**. The 8.4 GB source
+never lands on Drive or the laptop.
 
-Expected output: four `uint8` arrays of `(35000, 128, 128, 3)` = 1.72 GB each, **6.88 GB total**.
-The 8.4 GB source never lands on Drive or the laptop.
+Keep the browser tab open and the laptop awake. If it disconnects, re-run the cell — done shards are
+skipped, so a disconnect costs one shard.
 
-**Fallback A** (if `hf_hub_download` stalls): identical loop, fetch rows through the datasets-server
-`/rows` API, 100 rows/request. Proven to work on this dataset. 1–3 h.
-**Fallback B** (both Colab routes fail): laptop overnight `huggingface-cli download --resume-download`,
-build locally, upload the 6.88 GB cache — hours, last resort.
-**Never** `snapshot_download` the whole repo — that is what already failed, and one timeout discards
+**Fallback A** (if `hf_hub_download` stalls): same loop, rows via the datasets-server `/rows` API,
+100/request — the route already proven to work on this dataset. 1–3 h.
+**Never** `snapshot_download` the whole repo: that is what already failed, and one timeout discards
 the entire transfer.
 
-**Noa's copy:** share `/MyDrive/aidet/` and have her use *Add shortcut to Drive*. A shortcut costs no
-quota. Do not build it twice.
+**Noa's copy:** share `/MyDrive/aidet/`, she uses *Add shortcut to Drive*. Costs no quota. Never
+build it twice.
+
+**🎯 Tonight is a success if the build is running when you close the laptop.** Nothing else tonight
+matters as much.
 
 ---
 
-## While the build runs — two parallel tracks
+# 📅 MON 10 AUG — code, calibrate, run the matrix (~10 h, both)
 
-### Track I (Ido) · T+3 → T+6 · `src/model.py` + `src/train.py` (3 h)
+### Morning · in parallel
 
-Needs no data. Smoke-test against **random tensors** of the right shape — so if the build fails
-entirely, nothing here is lost.
+**Ido — `src/model.py` + `src/train.py` (3 h).** Needs no data; smoke-test against **random tensors**
+of the right shape, so a failed build costs nothing here.
 
 `CompactCNN`: 4 blocks of `[Conv3×3 → BN → ReLU]×2 → MaxPool2`, widths 32/64/128/256, GAP →
 dropout(0.3) → `Linear(256,1)`. ~1.2 M params. **Stride-1 3×3 convs from layer 1, first pool only
-after block 1** — the cue is high-frequency, aggressive early downsampling throws it away before the
+after block 1** — the cue is high-frequency; aggressive early downsampling destroys it before the
 network sees it.
 
-Training: AdamW, lr 3e-4, wd 1e-4, cosine to 0, batch 128, 40 epochs, AMP, BCE-with-logits.
-**Horizontal flip only** — every other augmentation is a resampling or re-encoding op and would
-inject the artefact under study. This is methodology, not laziness; it goes in the report.
+**One architecture only.** The spec's comparison bullet is `שיטות/מודלים` — methods *or* models — and
+the four equalisation strategies are the comparison. Holding the model fixed is also what isolates
+the preprocessing effect, which is the whole claim.
 
-**No DataLoader.** An arm is ~390 MB of uint8 — push it to VRAM once and index it. Faster, and
-*less* code.
+Training: AdamW, lr 3e-4, wd 1e-4, cosine to 0, batch 128, **epochs 40 (drop to 25 if calibration
+says so)**, AMP, BCE-with-logits. **Horizontal flip only** — every other augmentation is a resampling
+or re-encoding op and would inject the artefact under study. Methodology, not laziness; it goes in
+the report.
 
-Split discipline: 10 % of each arm's train set is an internal val set for checkpoint selection. All
-reported cells come from the official val split and are never used for model selection. Each cell
+**No DataLoader.** An arm is ~390 MB of uint8 — push it to VRAM once and index it. Faster, and less code.
+
+Split discipline: 10 % of each arm's train set is an internal val set for checkpoint selection. Every
+reported cell comes from the official val split and is never used for model selection. Each cell
 (s→t) = 500 fakes from generator *t* + the **same fixed 500 real** val images.
 
-**Done when:** `python -m src.train --strategy centre_crop --source BigGAN --seed 0` writes a
-`metrics.json` with seven cells.
-
-### Track N (Noa) · T+3 → T+4.5 · `src/baseline.py` (1.5 h, laptop, no GPU)
-
-Can start as soon as the **first val metadata shard** lands (~10 min into the build). Needs sizes
-only, never pixels.
-
+**Noa — `src/baseline.py` (1.5 h, laptop, no GPU).** Needs sizes only, never pixels; the val metadata
+landed last night.
 - **Square rule** — predict synthetic iff `h == w`. Zero parameters.
 - **Size-lookup rule** — collect `(h,w)` pairs emitted by fakes in train; predict synthetic iff the
   test pair is in that set.
 
-Report both **per 7×7 cell**, same shape as the CNN matrices, so they can sit side by side.
+Report both **per 7×7 cell**, same shape as the CNN matrices.
 
-> **Gate.** If the baseline is *not* near-perfect, stop and re-check the metadata before writing
-> another line of code. The entire framing of the project rests on this number.
+> **Gate.** If the baseline is not near-perfect, stop and re-check the metadata before writing another
+> line of code. The whole framing rests on this number.
 
----
+### Midday · calibration run (30 min, I) — **decision gate**
 
-# T+6.5 — Calibration run (30 min, I, Colab T4) — **decision gate**
-
-One real run: `centre_crop` / `BigGAN` / seed 0. Record wall clock, peak VRAM, in-domain accuracy.
+One real run: `centre_crop` / `BigGAN` / seed 0. Record wall clock, peak VRAM, diagonal accuracy.
 
 | Measured | Then |
 |---|---|
-| ≤ 5 min | Launch all 84 runs as planned |
-| 5–10 min | Drop to 2 seeds → 56 runs |
-| > 10 min | Go to the cut ladder |
+| ≤ 4 min | Run the 28 as planned, keep 40 epochs |
+| 4–8 min | Drop to **25 epochs** and re-time |
+| > 8 min | Halve the training set (4,000 → 2,000) as well |
 
-**Done when:** the measured minutes-per-run is written into the table below, and diagonal accuracy
-is > 95 % — confirming the pipeline learns at all before 84 runs are committed.
+Diagonal accuracy must be **> 95 %** — that confirms the pipeline learns at all before 28 runs are
+committed.
 
----
-
-# T+7 → T+9 — Seed 0 matrix · 28 runs, ~2 h GPU · **both in parallel**
+### Afternoon · seed 0 matrix — 28 runs, ~2 h, both in parallel
 
 | Account | Arms | Runs |
 |---|---|---|
 | **Ido** | `centre_crop`, `rescale` | 14 |
 | **Noa** | `pad`, `random_crop` | 14 |
 
-`notebooks/01_run_matrix.ipynb`: clone repo → mount Drive → nested loop over the seven sources.
-Resume story is one line: `if metrics.json exists: continue`.
+`notebooks/01_run_matrix.ipynb`: clone → mount Drive → nested loop over the seven sources. Resume
+story is one line: `if metrics.json exists: continue`.
 
-**Sync between two Google accounts:** each person commits their `metrics.json` files (~2 KB each) to
-the shared GitHub repo. That is the entire mechanism — no large transfer between accounts, ever.
+**Sync across two Google accounts:** each person commits their `metrics.json` (~2 KB each) to the
+shared GitHub repo. That is the entire mechanism — no large transfer between accounts, ever.
 
-**Done when:** 28 `metrics.json` on `main` and four complete 7×7 matrices with no missing cells.
+### Evening · start the figures (2–3 h, split)
 
----
+**Ido — transfer matrices + the ranking result.** Four 7×7 heatmaps on a shared scale plus the
+baseline as a fifth panel. Headline numbers: per-arm diagonal mean, off-diagonal mean, and **the gap**
+between them — that gap is the cross-generator failure the project is about.
 
-# T+9 → T+13 — Seeds 1 and 2 · 56 runs, ~4 h GPU · both in parallel
+Then **the result**: rank the seven generators by mean off-diagonal accuracy, once per strategy. Four
+rankings side by side, Spearman ρ between each pair. **A low ρ is the finding** — it means published
+cross-generator numbers depend on a preprocessing choice nobody reports.
 
-Same arm split. Report mean ± range over three seeds.
-
-If time is tight: **finish seed 1 for all 28 first**, then seed 2. Two seeds everywhere beats three
-seeds on half the grid, because the claim is about the whole grid. State in the report exactly which
-cells are single-seed.
-
-### Run budget
-
-| Arm | Runs/seed | Seeds | Total | @4 min | Account |
-|---|---|---|---|---|---|
-| `centre_crop` | 7 | 3 | 21 | 1.4 h | Ido |
-| `rescale` | 7 | 3 | 21 | 1.4 h | Ido |
-| `pad` | 7 | 3 | 21 | 1.4 h | Noa |
-| `random_crop` | 7 | 3 | 21 | 1.4 h | Noa |
-| **Total** | 28 | 3 | **84** | **5.6 h** | **2.8 h/account** |
-
-2.8 h per account ≈ two Colab sessions each, inside the free-tier allowance. Individual runs finish
-in minutes, so a 90-minute idle disconnect costs at most one run.
-
----
-
-# T+13 → T+19 — Analysis · ~6 h · split three ways · all CPU, all laptop
-
-**8a — Transfer matrices (I).** Four 7×7 heatmaps on a shared scale + the baseline as a fifth panel.
-Headline numbers: per-arm diagonal mean, off-diagonal mean, and **the gap** — that gap is the
-cross-generator failure the project is about.
-
-**8b — The ranking result, i.e. THE result (I).** Rank the seven generators by mean off-diagonal
-accuracy, once per strategy. Four rankings side by side, Spearman ρ between each pair. **A low ρ is
-the finding**: published cross-generator numbers depend on a preprocessing choice nobody reports.
-Overlay the three-seed spread so the reordering is visibly not noise.
-
-**8c — Input-gradient attribution (N).** The taught method, L10 slides 53–57 — **not Grad-CAM**.
+**Noa — attribution + spectra.**
+*Input-gradient attribution*, the taught method (L10 slides 53–57), **not Grad-CAM**:
 `g = ∂f(x)/∂x`, `saliency = max_channel |g|`, averaged over 200 images per generator per strategy.
 Two summary numbers: **border mass** (fraction of saliency in the outer 16-px ring — tests directly
-whether the `pad` model reads its own zero border) and the **radial spectrum of the saliency map**.
+whether the `pad` model reads its own zero border) and the radial spectrum of the saliency map.
 
-**8d — Radially averaged spectra (N).** Per (class, generator, strategy): grayscale, subtract mean,
-`fft2`, `fftshift`, magnitude, average over 64 radial annuli, log-magnitude vs normalised frequency.
-The informative curve is **real minus fake**. No window function — the `pad` border is a real feature
-of that arm and windowing would hide it; note the choice in the caption.
+*Radially averaged spectra*: per (class, generator, strategy) — grayscale, subtract mean, `fft2`,
+`fftshift`, magnitude, average over 64 radial annuli, log-magnitude vs normalised frequency. The
+informative curve is **real minus fake**. No window function — the `pad` border is a real feature of
+that arm and windowing would hide it; note the choice in the caption.
 
-**Done when:** every figure the report will use is a PNG in `results/figures/`, each with a
-one-sentence claim attached. Use the `dataviz` skill.
+Use the `dataviz` skill. Every figure gets a one-sentence claim attached to it.
+
+**🎯 Monday is a success if all 28 seed-0 cells exist and the figures are drafted.**
+
+### Total run budget
+
+| Block | Runs | Est. | When |
+|---|---|---|---|
+| Seed 0, four arms | 28 | 2 h | Mon afternoon |
+| Seed 1, four arms — **required** | 28 | 2 h | Tue, background |
+| Seed 2 — bonus | 28 | 2 h | only if idle |
+| **Required total** | **56** | **~4 h** | **~2 h per account** |
+
+Inside the free-tier allowance for both accounts. Individual runs finish in minutes, so a 90-minute
+idle disconnect costs at most one run.
 
 ---
 
-# T+19 → T+27 — Report, ≤5 pages PDF · ~8 h · both
+# 📅 TUE 11 AUG — write, render, ship (~10 h, both)
+
+### First thing: launch the remaining GPU work in the background (unattended)
+
+Both accounts start these **before opening the report**. They run for hours without supervision
+while the writing happens — GPU time and writing time are free to overlap.
+
+| Priority | What | Runs | Why this order |
+|---|---|---|---|
+| 1 | **Seed 1**, all four arms | 28 | Required — a ranking claim from one seed is not defensible |
+| 2 | Seed 2, all four arms | 28 | Bonus. Tightens the spread; drop it first |
+
+Priority 1 ≈ **1 h of GPU per account** — it finishes early in the writing block. Priority 2 goes
+only if the machines are idle anyway.
+
+The report states exactly which cells carry how many seeds, whatever the count ends up being.
+
+### Morning–midday · the report, ≤5 pages PDF (5–6 h, both, split by section)
 
 **Count the rendered PDF, not the Markdown**, and re-count after every edit.
 
-Allocation: problem + confound 0.5 p · data 0.5 p · method (model, four strategies, baseline) 1 p ·
-results (four matrices + ranking table) 1.5 p · analysis (attribution + spectra) 1 p · limitations
-and conclusion 0.5 p.
+The spec lists **ten required components** for the report. Use them as the section plan so a grader
+can tick every one off — none is optional:
 
-Mandatory from the spec: **per-member contribution breakdown** (draft it as you go), repo link,
-fixed seeds and run commands.
+| # | Required component | Pages | Who |
+|---|---|---|---|
+| 1 | Motivation and problem definition | 0.5 | I |
+| 2 | Review of related work | 0.4 | N |
+| 3 | Description of the data | 0.4 | N |
+| 4 | **Models and hyperparameters** — both architectures, optimiser, lr, schedule, batch, epochs, seeds | 0.7 | I |
+| 5 | Results — four matrices, baseline matrix, ranking table | 1.4 | I |
+| 6 | Analysis of results — attribution + spectra | 0.9 | N |
+| 7 | Discussion: insights, **limitations, future directions** | 0.4 | N |
+| 8 | References | 0.2 | N |
+| 9 | Per-member contribution breakdown | 0.05 | both |
+| 10 | Code repository link | — | I |
+
+Items 4, 7 and 8 are the ones most easily lost under time pressure and are each explicitly named in
+the spec. **Hyperparameters must be stated as numbers, not prose** — that is what makes item 4
+gradeable.
 
 **Put these in — they are what separates "good" from "excellent":**
 - `pad` ≡ `rescale` for all seven generators (all emit square images). They differ **only on the real
   class**, the only one with variable aspect. Not a defect — a clean single-class intervention.
 - **BigGAN's entire row is a control**: at native 128², all four strategies are the identity on it,
   so any variation across strategies in that row comes purely from the real class.
-- Binomial SE ±1.6 pp per cell at n=1000, and which ranking differences survive it.
-- Which cells are single-seed.
+- Binomial SE **±1.6 pp** per cell at n=1000, and which ranking differences survive it.
+- How many seeds each cell carries, and which ranking differences survive the spread.
+- Whether the spectra and the attribution agree: does accuracy drop in the arms where the spectra
+  show the high-frequency band attenuated? That link between two independent analyses is exactly the
+  "insight" the grading criteria reward.
 - Grommelt et al. (2024), arXiv 2403.17608, already established the bias. **Our claim is not the
-  bias — it is that which correction you choose changes the conclusion.** Say so explicitly; it
+  bias — it is that which correction you choose changes the conclusion.** Say it explicitly; it
   protects against the grader who has read that paper.
 
----
+### Afternoon · README + reproducibility (1.5 h, I)
 
-# T+27 → T+31 — Presentation, 15 min · ~4 h · both
+One-paragraph description · `pip install -r requirements.txt` · the cache-build command · the exact
+`train.py` command for one cell · the loop reproducing all 28 · where metrics land · results table
+inline. Confirm `results/runs/**/metrics.json` and `results/figures/*.png` are committed and `cache/`
+is not. Verify a clean clone runs.
 
-12–14 slides, ~7 min each. (1) title · (2) the shortcut: a real photo beside a 512² fake, "the size
-alone tells you" · (3) the baseline number, which should shock · (4) the question: does the fix
-change the answer? · (5) data · (6) the four strategies, one visual row each · (7) model and protocol ·
+### Evening · deck, as far as it gets (may slip past 11 Aug)
+
+12–14 slides: (1) title · (2) the shortcut — a real photo beside a 512² fake, "the size alone tells
+you" · (3) the baseline number, which should shock · (4) the question: does the fix change the
+answer? · (5) data · (6) the four strategies, one visual row each · (7) model and protocol ·
 (8–9) the matrices · (10) **the ranking table — the money slide** · (11) attribution · (12) spectra ·
 (13) limitations · (14) contributions + repo.
 
-Rehearse once against a clock. Overrunning 15 minutes is the most common way to lose points on a
-talk that is otherwise fine.
+Rehearse against a clock before the actual presentation. Overrunning 15 minutes is the most common
+way to lose points on a talk that is otherwise fine.
 
----
-
-# T+31 → T+33 — Reproducibility pass · ~2 h · I
-
-`README.md`: one-paragraph description · `pip install -r requirements.txt` · the cache-build command ·
-the exact `train.py` command for one cell · the loop reproducing all 28 · where metrics land ·
-results table inline. Confirm `results/runs/**/metrics.json` and `results/figures/*.png` are
-committed and `cache/` is not. Verify a clean clone runs.
-
-**Done when:** a stranger can clone and reproduce one cell without asking a question.
+**🎯 Tuesday is a success if the report PDF is ≤5 pages, covers all ten required components, and is
+pushed.** If it does not, Wednesday exists — see the cut ladder. The date is the thing that gives.
 
 ---
 
@@ -308,19 +336,35 @@ committed and `cache/` is not. Verify a clean clone runs.
 
 | When | Risk | Mitigation, already scheduled |
 |---|---|---|
-| T+0 | Deadline is sooner than assumed | Question fires at T+0; cut ladder below |
-| T+0 | Drive full → build dies at hour 3 | 2-minute quota check at T+0 |
-| T+3 | Corrupt cache poisons all 84 runs | 2-shard pilot + visual grid **before** the full build |
-| T+3 | HF download stalls again | Fallback A (datasets-server) shares the same loop body |
-| T+6.5 | Runs 4× slower than estimated | Calibration gate decides run count before committing |
-| T+13 | **All four rankings agree — null result** | Write the report so a null is a reportable finding, not a rewrite. The baseline number and the four matrices stand on their own. |
+| Tonight | Drive full → build dies at hour 3 | 2-minute quota check first |
+| Tonight | An account has no T4 | Checked before any run is scheduled |
+| Tonight | HF download stalls again | Fallback A shares the same loop body |
+| Tonight | Corrupt cache poisons every run | 2-shard pilot + visual grid **before** the full build |
+| Mon midday | Runs slower than estimated | Calibration gate cuts epochs, then training-set size |
+| Mon evening | Matrix incomplete at end of day | Runs are resumable per cell; finish Tuesday morning alongside the seeds |
+| Tue | **All four rankings agree — null result** | Write the report so a null is a reportable finding, not a rewrite. The baseline number and the four matrices stand on their own. |
 
-## Cut ladder — apply top-down, stop as soon as it fits
+## Cut ladder — requirements first, date second
 
-1. Seeds 3 → 2 → 1
-2. Epochs 40 → 25
-3. Halve each arm's training set (4,000 → 2,000)
-4. Drop the saliency radial spectrum (keep the image spectra)
+Everything on this ladder is **quality of execution, never a requirement**. Apply top-down and stop
+as soon as it fits.
 
-**Never cut:** one of the four equalisation arms · the spectra or attribution · training from
-scratch. All three are promised in the submitted proposal.
+1. **Let the date slip.** 11 Aug is self-imposed and there is no course deadline. A day late with the
+   requirements met beats on-time with a requirement missing — the project is 80 % of the grade.
+2. Let the **deck** finish after 11 Aug. The presentation date is set by the course and is separate.
+3. Seeds 3 → 2. (**Never below 2** — see the seeds decision above.)
+4. Epochs 40 → 25.
+5. Halve each arm's training set (4,000 → 2,000).
+6. Attribution over 100 images per cell instead of 200.
+7. Drop the saliency radial spectrum — keep the image spectra, which are what the proposal promised.
+
+**Never cut, at any deadline pressure:**
+
+| | Why |
+|---|---|
+| Any of the four equalisation arms | Promised in the submitted proposal; the comparison *is* the result |
+| Spectra + attribution | Promised in the submitted proposal |
+| Training from scratch | Promised, and a pretrained backbone is contaminated by ImageNet |
+| The dimension-rule baseline | Spec requires a clear baseline |
+| Two seeds | Spec grades depth of analysis; a one-seed ranking claim fails it |
+| Contribution breakdown, repo link, README | Each explicitly required and explicitly graded |
