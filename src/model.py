@@ -117,7 +117,7 @@ def _smoke_test():
     print("params {:,} OK; forward {} OK".format(n_params, tuple(logits.shape)))
 
     # Memorize ten fixed examples. A model that cannot do this has a broken gradient path
-    # somewhere -- a detached tensor or a dead ReLU stack -- which the shape check above
+    # somewhere (a detached tensor or a dead ReLU stack) which the shape check above
     # would pass without noticing. The labels are random, so memorizing is the only way
     # the loss can reach zero.
     model.train()
