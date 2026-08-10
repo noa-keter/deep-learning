@@ -66,10 +66,10 @@ EVAL_BATCH_SIZE: Final[int] = 512
 #: exact artefact this study measures. A methodological choice, not laziness.
 FLIP_PROBABILITY: Final[float] = 0.5
 
-#: Images arrive as uint8 and are mapped to [-1, 1].
-UINT8_MAX: Final[float] = 255.0
-NORMALISE_MEAN: Final[float] = 0.5
-NORMALISE_STD: Final[float] = 0.5
+#: Images arrive as uint8 and are mapped to [-1, 1] by `x / 127.5 - 1`. Kept
+#: character-for-character in step with `model.normalize`: training and the
+#: attribution analysis must present the model with the same input scale.
+UINT8_HALF_RANGE: Final[float] = 127.5
 
 #: A logit above this means "synthetic"; the classes are balanced, so 0 (p = 0.5)
 #: is the honest threshold and no tuning is done on it.
@@ -199,14 +199,9 @@ def _normalise(images: Tensor) -> Tensor:
         float32 (B, 3, 128, 128).
     """
     # `.float()` always allocates here, because the source dtype is uint8 - so the
-    # in-place ops that follow cannot reach back into the cached uint8 arm.
-    return (
-        images.permute(0, 3, 1, 2)
-        .float()
-        .div_(UINT8_MAX)
-        .sub_(NORMALISE_MEAN)
-        .div_(NORMALISE_STD)
-    )
+    # in-place ops that follow cannot reach back into the cached uint8 arm, and the
+    # whole mapping costs one allocation rather than one per operation.
+    return images.permute(0, 3, 1, 2).float().div_(UINT8_HALF_RANGE).sub_(1.0)
 
 
 def _forward_logits(model: Module, images: Tensor) -> Tensor:
