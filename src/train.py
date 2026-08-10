@@ -1,6 +1,6 @@
 """
 One (strategy, source, seed) run: train a detector on one generator, evaluate it
-against all seven, write `metrics.json`.
+against all seven, write `metrics.json` and the selected weights beside it.
 
 The whole arm - 3,600 training images, 400 internal-validation images and the
 4,000-image test set - is pushed to the GPU once as uint8 and indexed there.
@@ -46,6 +46,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, torch is not installed loca
 
 __all__ = [
     "cell_accuracies",
+    "checkpoint_path",
     "evaluate_row",
     "metrics_path",
     "train_one",
@@ -79,6 +80,13 @@ DEFAULT_DEVICE: Final[str] = "cuda"
 DEFAULT_RESULTS_DIR: Final[Path] = Path("results/runs")
 PRINT_EVERY_EPOCHS: Final[int] = 10
 
+#: Filename of the selected `state_dict` inside a run's own output directory. Every
+#: run writes one, unconditionally: the input-gradient attribution needs a trained
+#: model per (strategy, source), and recovering weights we already had would mean
+#: re-running the matrix. CompactCNN is 1,173,473 parameters, so a checkpoint is
+#: ~4.7 MB and all 56 come to ~0.26 GB. Not committed - `.gitignore` covers `*.pt`.
+CHECKPOINT_NAME: Final[str] = "model.pt"
+
 
 # --------------------------------------------------------------------------- #
 # Torch-free core: scoring and output layout
@@ -108,6 +116,35 @@ def metrics_path(
         `<results_dir>/<strategy>/<source>/seed<k>/metrics.json`.
     """
     return Path(results_dir) / strategy / source / f"seed{seed}" / "metrics.json"
+
+
+def checkpoint_path(
+    results_dir: str | Path,
+    strategy: Strategy,
+    source: str,
+    seed: int,
+) -> Path:
+    """
+    Locate one run's weights file.
+
+    Deliberately the run's *own* directory, beside its `metrics.json`: the 56 runs
+    each get a distinct (strategy, source, seed) directory, so no two can overwrite
+    each other and no run needs to invent a name.
+
+    Resume is unaffected - it keys on `metrics.json` alone, which func _main writes
+    only after the checkpoint has been saved. A run interrupted mid-training leaves
+    neither file behind and is simply redone.
+
+    Args:
+        results_dir: Root of the committed results tree, e.g. "results/runs".
+        strategy: One of STRATEGIES.
+        source: Generator the detector was trained on.
+        seed: Run seed.
+
+    Returns:
+        `<results_dir>/<strategy>/<source>/seed<k>/model.pt`.
+    """
+    return metrics_path(results_dir, strategy, source, seed).with_name(CHECKPOINT_NAME)
 
 
 def _cell_mask(gen_ids: np.ndarray, generator: str) -> np.ndarray:
@@ -336,6 +373,7 @@ def train_one(
     weight_decay: float = WEIGHT_DECAY,
     train_per_class: int = TRAIN_PER_CLASS,
     device: str = DEFAULT_DEVICE,
+    results_dir: str | Path = DEFAULT_RESULTS_DIR,
     model_out: str | Path | None = None,
 ) -> dict[str, object]:
     """
@@ -361,14 +399,19 @@ def train_one(
         train_per_class: Training images per class - halve it if the calibration
             run comes in slow.
         device: "cuda" on Colab; "cpu" works for the smoke test, with AMP off.
-        model_out: Optional path to write the selected `state_dict` to. Off by
-            default: checkpoints are ~5 MB, are not committed, and only the
-            attribution analysis needs one.
+        results_dir: Root of the results tree; only used to derive the checkpoint
+            path when `model_out` is not given. It does not write `metrics.json` -
+            func _main does that.
+        model_out: Where to write the selected `state_dict`. Defaults to
+            `checkpoint_path(results_dir, strategy, source, seed)`, so every run
+            saves its weights without the caller having to name a file. Pass an
+            explicit path to put one elsewhere.
 
     Returns:
         A JSON-serialisable dict with `strategy`, `source`, `seed`, `cells`
         (generator -> accuracy), `cell_sizes`, `in_domain`, `val_accuracy`,
-        `best_epoch`, `wall_clock_s`, `load_s`, `peak_vram_mb` and `config`.
+        `best_epoch`, `wall_clock_s`, `load_s`, `peak_vram_mb`, `checkpoint` and
+        `config`.
     """
     import torch
     from torch.nn import functional as F
@@ -450,11 +493,16 @@ def train_one(
     cells = evaluate_row(model, arm.x_test, arm.y_test, arm.gen_ids, device, EVAL_BATCH_SIZE)
     cell_sizes = {g: int(_cell_mask(arm.gen_ids, g).sum()) for g in GENERATORS}
 
-    if model_out is not None:
-        path = Path(model_out)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(best_state, path)
-        print(f"[train] checkpoint -> {path}", flush=True)
+    # Saved before `metrics.json` is written, which is what keeps resume honest: a
+    # directory holding metrics always holds the weights they were computed from.
+    saved_to = (
+        Path(model_out)
+        if model_out is not None
+        else checkpoint_path(results_dir, strategy, source, seed)
+    )
+    saved_to.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(best_state, saved_to)
+    print(f"[train] checkpoint -> {saved_to}", flush=True)
 
     wall_clock_s = time.perf_counter() - started
     off_domain = [accuracy for g, accuracy in cells.items() if g != source]
@@ -471,6 +519,9 @@ def train_one(
         "wall_clock_s": wall_clock_s,
         "load_s": load_s,
         "peak_vram_mb": (torch.cuda.max_memory_allocated() / 1e6) if use_amp else 0.0,
+        # `as_posix` so the committed JSON reads the same whether the run happened on
+        # Colab or on a Windows laptop.
+        "checkpoint": saved_to.as_posix(),
         "config": {
             "epochs": epochs,
             "batch_size": batch_size,
@@ -523,7 +574,12 @@ def _main() -> None:
     parser.add_argument("--train-per-class", type=int, default=TRAIN_PER_CLASS)
     parser.add_argument("--device", default=DEFAULT_DEVICE)
     parser.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
-    parser.add_argument("--model-out", type=Path, default=None, help="save the selected weights")
+    parser.add_argument(
+        "--model-out",
+        type=Path,
+        default=None,
+        help=f"where to save the selected weights (default: {CHECKPOINT_NAME} beside metrics.json)",
+    )
     parser.add_argument("--force", action="store_true", help="re-run even if metrics.json exists")
     args = parser.parse_args()
 
@@ -544,6 +600,7 @@ def _main() -> None:
         weight_decay=args.weight_decay,
         train_per_class=args.train_per_class,
         device=args.device,
+        results_dir=args.results_dir,
         model_out=args.model_out,
     )
     out.parent.mkdir(parents=True, exist_ok=True)
