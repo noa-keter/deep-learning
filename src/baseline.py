@@ -1,21 +1,23 @@
 """Size-confound baselines: how much of "AI-image detection" is solved by image size alone.
 
-Both rules use only the cached metadata (h, w, label, generator) -- no pixels, no training,
-no GPU. They measure how far a detector gets by exploiting the fact that generated images
-are square while real photographs are not, which is the confound the four equalization
-strategies are meant to remove.
+Both rules use only the cached metadata (h, w, generator) -- no pixels, no training, no GPU.
+They measure how far a detector gets by exploiting the fact that generated images are square
+while real photographs are not, which is the confound the four equalization strategies are
+meant to remove.
 
   square rule       predict synthetic iff h == w. Zero parameters, nothing fitted.
   size-lookup rule  fit the (h, w) pairs a generator emits in train; predict synthetic
                     iff the test pair is in that set.
 
 Each rule produces a 7x7 source->target matrix in the same layout and file format as the
-CNN runs, at <out>/{rule}/{source}/seed{n}/metrics.json.
+CNN runs, at <out>/{rule}/{source}/seed0/metrics.json, scored on the same images: the cache
+layout, the generator vocabulary and the evaluation pools all come from data.py.
 
 Run:  python src/baseline.py --cache /path/to/aidet/cache --out results/baseline
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -24,84 +26,124 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from eval_select import real_selection_hash, select_eval_indices
+# Imported rather than restated: sharing these constants is what puts the baseline on the
+# same evaluation images as the CNN runs, which is the only reason the panels compare.
+from data import (
+    CACHE_SIZE_PX,
+    GENERATORS,
+    REAL_POOL_SEED,
+    TEST_PER_GENERATOR,
+    TEST_REAL_N,
+    TRAIN_PER_CLASS,
+    load_meta,
+)
 
-GENERATORS = ["ADM", "BigGAN", "GLIDE", "Midjourney", "SD15", "VQDM", "Wukong"]
+# The split the dataset calls `validation` is what this project reports on. The
+# model-selection split is carved out of `train` and never appears here.
+TEST_SPLIT = "validation"
+TRAIN_SPLIT = "train"
 
-# The dataset's own category order, needed when `generator` arrives as integer codes.
-# Index 5 is SD14, which contributes no rows: decoding through GENERATORS above would read
-# SD15 as SD14 and shift every name after it, giving a correctly-shaped matrix with the
-# wrong row labels.
-CLASS_LABEL_NAMES = [
-    "Real", "ADM", "BigGAN", "GLIDE", "Midjourney", "SD14", "SD15", "VQDM", "Wukong",
-]
+# Images per class in a reported cell. Overridden only by --partial, for the pilot.
+FULL_POOL_SIZES = (TEST_PER_GENERATOR, TEST_REAL_N)
 
-# Column names vary with how the metadata was written; both spellings map to the same field.
-KEY_ALIASES = {"height": "h", "width": "w", "class": "label"}
+# Expected split sizes, derived so they track data.py rather than drifting from it. Each
+# split holds one real image per fake, which is why reals and fakes share a count.
+EXPECTED_TEST_FAKES = len(GENERATORS) * TEST_PER_GENERATOR
+EXPECTED_TEST_REALS = EXPECTED_TEST_FAKES
+EXPECTED_TEST_ROWS = EXPECTED_TEST_FAKES + EXPECTED_TEST_REALS
+EXPECTED_TRAIN_ROWS = 2 * len(GENERATORS) * TRAIN_PER_CLASS
 
-# The validation split is written either way depending on the export.
-SPLIT_PREFIXES = {"val": ("val", "validation"), "train": ("train",)}
-
-
-def _shard_number(fname):
-    """Trailing integer of a <split>-<n>.npz filename, for ordering shards numerically."""
-    stem = os.path.splitext(fname)[0]
-    return int(stem.rsplit("-", 1)[1])
+# The square rule should be near-perfect: every generated image is square, and only the few
+# real photos that happen to be square cost anything. Well below this means bad metadata.
+GATE_MIN_ACCURACY = 0.97
 
 
-def load_meta(cache_dir, split):
-    """Concatenate every meta/<split>-<shard>.npz into one dict of flat arrays.
+def _real_mask(generator):
+    """True for real rows. Real is whatever tag is not a known generator.
 
-    Returns {'h', 'w', 'label', 'generator'}, all length N, ordered shard-then-row to match
-    how the .npy pixel shards concatenate, so one index addresses both.
+    Found by exclusion because the dataset stores its own name for the real class verbatim.
+    Exactly one unknown tag is allowed: more than one means a generator was renamed, and
+    counting it as real would corrupt every cell.
     """
-    meta_dir = os.path.join(cache_dir, "meta")
-    available = [f for f in os.listdir(meta_dir) if f.endswith(".npz")]
-
-    shards = []
-    for prefix in SPLIT_PREFIXES.get(split, (split,)):
-        shards = [f for f in available if f.startswith(prefix + "-")]
-        if shards:
-            break
-    if not shards:
-        raise FileNotFoundError("no {} shards in {}".format(split, meta_dir))
-
-    # Numeric, not lexicographic: with unpadded numbers "val-10" would sort before "val-2"
-    # and the metadata would line up against the wrong pixel rows. Nothing raises when that
-    # happens -- the matrix still prints, built on mismatched rows.
-    shards.sort(key=_shard_number)
-
-    columns = {name: [] for name in ("h", "w", "label", "generator")}
-    for fname in shards:
-        with np.load(os.path.join(meta_dir, fname), allow_pickle=False) as shard:
-            stored_name = {KEY_ALIASES.get(key, key): key for key in shard.files}
-            for name in columns:
-                if name not in stored_name:
-                    raise KeyError(
-                        "{}: no {!r} column (has {})".format(fname, name, sorted(shard.files))
-                    )
-                columns[name].append(shard[stored_name[name]])
-
-    meta = {name: np.concatenate(chunks) for name, chunks in columns.items()}
-    meta["generator"] = _decode_generator(meta["generator"])
-    return meta
+    known = set(GENERATORS)
+    tags = set(np.unique(generator).tolist())
+    unknown_tags = sorted(tags - known)
+    if not tags & known:
+        raise ValueError("no known generator tags in cache; found {}".format(sorted(tags)))
+    if len(unknown_tags) != 1:
+        raise ValueError(
+            "expected exactly one real tag besides the generators, found {}".format(unknown_tags)
+        )
+    return generator == unknown_tags[0]
 
 
-def _decode_generator(column):
-    """Generator column -> array of str names, whether it arrives as ints, bytes, or str."""
-    if column.dtype.kind in "iu":
-        if column.max() >= len(CLASS_LABEL_NAMES):
-            raise ValueError(
-                "generator code {} exceeds the {} known class names".format(
-                    column.max(), len(CLASS_LABEL_NAMES)
-                )
-            )
-        return np.asarray(CLASS_LABEL_NAMES, dtype="U")[column]
-    # np.savez stores str arrays as fixed-width bytes on some numpy versions, so a
-    # comparison against a str generator name would silently match nothing.
-    if column.dtype.kind == "S":
-        return column.astype("U")
-    return column
+def _choose(pool, n, seed, what):
+    """n rows from pool without replacement, deterministically, returned sorted.
+
+    Mirrors the draw the training pipeline performs on the same pools with the same seed,
+    so both score identical images. Raises rather than returning a short selection: a
+    silent shortfall would unbalance the classes and invalidate the results.
+    """
+    if len(pool) < n:
+        raise ValueError("{}: need {} rows, cache has {}".format(what, n, len(pool)))
+    return np.sort(np.random.default_rng(seed).choice(pool, size=n, replace=False))
+
+
+def select_real_block(meta, n_real=TEST_REAL_N):
+    """The real half of every cell, drawn once. Returns sorted indices.
+
+    Drawn from REAL_POOL_SEED rather than a run seed, and computed once per run rather than
+    per cell: passing this block down is what makes two cells physically unable to score
+    different real images, which no amount of checking afterwards could guarantee.
+    """
+    is_real = _real_mask(np.asarray(meta["generator"]))
+    return _choose(np.flatnonzero(is_real), n_real, REAL_POOL_SEED, "test real block")
+
+
+def select_fake_block(meta, generator, n_fake=TEST_PER_GENERATOR):
+    """The fake half of one cell: `generator`'s test rows. Returns sorted indices."""
+    gen = np.asarray(meta["generator"])
+    return _choose(
+        np.flatnonzero(gen == generator),
+        n_fake,
+        REAL_POOL_SEED,
+        "test fakes for {}".format(generator),
+    )
+
+
+def select_eval_indices(meta, generator, n_fake=TEST_PER_GENERATOR, n_real=TEST_REAL_N):
+    """Rows for one (source -> target) cell: the target's fakes plus the shared real block.
+
+    Returns (fake_idx, real_idx), each sorted. The counts are arguments only so the pilot
+    can score a partial cache; a reported run uses the defaults, which are the pools
+    train.py draws from.
+    """
+    return select_fake_block(meta, generator, n_fake), select_real_block(meta, n_real)
+
+
+def _pilot_pool_sizes(test_meta):
+    """Largest per-class pool a partial cache can support, as (n_fake, n_real).
+
+    The smallest generator sets the fake count so every cell scores the same number of
+    images, and the real block matches it to keep the classes balanced.
+    """
+    gen = np.asarray(test_meta["generator"])
+    n_fake = min(int((gen == g).sum()) for g in GENERATORS)
+    n_real = int(_real_mask(gen).sum())
+    if n_fake == 0:
+        raise ValueError("at least one generator has no test rows; nothing to score")
+    return min(n_fake, TEST_PER_GENERATOR), min(n_fake, n_real, TEST_REAL_N)
+
+
+def real_selection_hash(meta, real_idx, length=8):
+    """Digest of the shared real block's (h, w) pairs, for confirming two runs agree.
+
+    Hashes the sizes rather than the row indices so it also catches a cache built in a
+    different shard order, which an index-level comparison would miss.
+    """
+    pairs = np.stack([np.asarray(meta["h"])[real_idx], np.asarray(meta["w"])[real_idx]], axis=1)
+    pairs = pairs[np.lexsort((pairs[:, 1], pairs[:, 0]))]
+    return hashlib.sha256(pairs.astype(np.int64).tobytes()).hexdigest()[:length]
 
 
 def _cell_scores(pred, truth):
@@ -120,9 +162,13 @@ def _cell_scores(pred, truth):
     }
 
 
-def _eval_cell(meta, target, rule, seed):
-    """Apply a fitted rule to one (source -> target) cell's 500 fakes + fixed 500 reals."""
-    fake_idx, real_idx = select_eval_indices(meta, target, seed=seed)
+def _eval_cell(meta, target, rule, real_idx, n_fake=TEST_PER_GENERATOR):
+    """Apply a fitted rule to one (source -> target) cell: the target's fakes + shared reals.
+
+    Takes the real block rather than drawing it, so every cell in the grid provably scores
+    the same real images.
+    """
+    fake_idx = select_fake_block(meta, target, n_fake)
     idx = np.concatenate([fake_idx, real_idx])
 
     hw = np.stack([meta["h"][idx], meta["w"][idx]], axis=1)
@@ -131,18 +177,15 @@ def _eval_cell(meta, target, rule, seed):
 
 
 def _eval_cell_full(meta, target, rule):
-    """Same rule, scored on every val fake of `target` and every val real.
+    """Same rule, scored on every test fake of `target` and every test real.
 
-    The 500+500 cell matches the CNN's protocol; this one uses the whole population
-    because the baseline is cheap enough to afford it, giving a ~2.6x tighter estimate
-    that does not depend on which reals were sampled.
-
-    Balanced accuracy (mean of TPR and TNR) rather than plain accuracy: the pool is ~500
-    fakes against ~3,500 reals, so plain accuracy would mostly measure the real class.
+    A tighter estimate than the sampled cell, which the baseline can afford and the CNN
+    cannot. Reports balanced accuracy because reals outnumber fakes here by roughly seven
+    to one, and plain accuracy over that would mostly measure the real class.
     """
-    gen, label = meta["generator"], meta["label"]
-    fake_idx = np.flatnonzero((label == 1) & (gen == target))
-    real_idx = np.flatnonzero(label == 0)
+    gen = meta["generator"]
+    fake_idx = np.flatnonzero(gen == target)
+    real_idx = np.flatnonzero(_real_mask(gen))
     idx = np.concatenate([fake_idx, real_idx])
 
     hw = np.stack([meta["h"][idx], meta["w"][idx]], axis=1)
@@ -153,46 +196,51 @@ def _eval_cell_full(meta, target, rule):
     return scores
 
 
-def square_rule_matrix(val_meta, seed=0):
+def square_rule_matrix(test_meta, real_idx, n_fake=TEST_PER_GENERATOR):
     """Predict synthetic iff h == w. Returns (cells, full_pool), each a 7x7 source->target dict.
 
     Nothing is fitted, so the source axis has no effect and all seven rows come out
     identical. The full 7x7 is emitted anyway so this drops into the figure grid beside
     the CNN matrices without special-casing.
     """
-    rule = lambda hw: hw[:, 0] == hw[:, 1]
-    row = {t: _eval_cell(val_meta, t, rule, seed) for t in GENERATORS}
-    full = {t: _eval_cell_full(val_meta, t, rule) for t in GENERATORS}
-    matrix = {s: {t: dict(row[t]) for t in GENERATORS} for s in GENERATORS}
-    return matrix, {s: {t: dict(full[t]) for t in GENERATORS} for s in GENERATORS}
+    def rule(hw):
+        return hw[:, 0] == hw[:, 1]
+
+    shared_row = {t: _eval_cell(test_meta, t, rule, real_idx, n_fake) for t in GENERATORS}
+    shared_full = {t: _eval_cell_full(test_meta, t, rule) for t in GENERATORS}
+    matrix = {s: {t: dict(shared_row[t]) for t in GENERATORS} for s in GENERATORS}
+    full = {s: {t: dict(shared_full[t]) for t in GENERATORS} for s in GENERATORS}
+    return matrix, full
 
 
-def size_lookup_matrix(train_meta, val_meta, seed=0):
+def size_lookup_matrix(train_meta, test_meta, real_idx, n_fake=TEST_PER_GENERATOR):
     """Fit per source: the (h, w) pairs that generator emits in train; in-set = synthetic.
 
-    Returns (cells, full_pool), each a 7x7 source->target dict. Cell (s, t) means "knows
-    s's resolutions, tested on t", fitted on train and scored on val -- the same protocol
-    the CNN follows, which is what makes the two matrices comparable.
-
-    Generators sharing a native resolution will score well on each other, so the matrix is
-    expected to come out blocked by resolution rather than by generator identity.
+    Returns (cells, full_pool), each a 7x7 source->target dict. Cell (source, target) reads
+    "knows source's resolutions, tested on target" -- fitted on train, scored on test, the
+    same protocol the CNN follows. Expect the matrix to block by resolution rather than by
+    generator, since generators sharing a native size will score well on each other.
     """
     gen = train_meta["generator"]
     matrix, full = {}, {}
 
     for source in GENERATORS:
-        # The label term is redundant here (reals carry "Real" in the generator column) but
-        # states the intent -- fit on this generator's fakes -- and survives a re-export
-        # that tags reals differently.
-        fitted = (gen == source) & (train_meta["label"] == 1)
-        known = set(zip(train_meta["h"][fitted].tolist(), train_meta["w"][fitted].tolist()))
-        if not known:
+        source_rows = gen == source
+        known_sizes = set(
+            zip(train_meta["h"][source_rows].tolist(), train_meta["w"][source_rows].tolist())
+        )
+        if not known_sizes:
             raise ValueError("no train rows for source {!r}".format(source))
 
-        # Closure over `known` by default-arg so each row's rule keeps its own fitted set.
-        rule = lambda hw, k=known: np.array([(int(a), int(b)) in k for a, b in hw], bool)
-        matrix[source] = {t: _eval_cell(val_meta, t, rule, seed) for t in GENERATORS}
-        full[source] = {t: _eval_cell_full(val_meta, t, rule) for t in GENERATORS}
+        # Bound as a default argument so each source's rule keeps its own size set rather
+        # than closing over the loop variable.
+        def rule(hw, sizes=known_sizes):
+            return np.array([(int(h), int(w)) in sizes for h, w in hw], bool)
+
+        matrix[source] = {
+            t: _eval_cell(test_meta, t, rule, real_idx, n_fake) for t in GENERATORS
+        }
+        full[source] = {t: _eval_cell_full(test_meta, t, rule) for t in GENERATORS}
 
     return matrix, full
 
@@ -200,7 +248,12 @@ def size_lookup_matrix(train_meta, val_meta, seed=0):
 def _summarize(matrix):
     """Diagonal mean, off-diagonal mean, and the gap -- the same three numbers as the CNN arms."""
     diagonal = [matrix[gen][gen]["accuracy"] for gen in GENERATORS]
-    off_diagonal = [matrix[src][tgt]["accuracy"] for src in GENERATORS for tgt in GENERATORS if src != tgt]
+    off_diagonal = [
+        matrix[source][target]["accuracy"]
+        for source in GENERATORS
+        for target in GENERATORS
+        if source != target
+    ]
     return {
         "diagonal_mean": float(np.mean(diagonal)),
         "off_diagonal_mean": float(np.mean(off_diagonal)),
@@ -208,28 +261,36 @@ def _summarize(matrix):
     }
 
 
-def _check_composition(val_meta, train_meta):
-    """Stop unless the cache holds the expected dataset.
+def _check_composition(test_meta, train_meta):
+    """Stop unless the cache holds the full expected dataset.
 
     These are exact population counts, so any mismatch means the build dropped, duplicated
     or mis-split rows. Worth failing on, because a wrong cache still yields a complete and
-    plausible-looking matrix.
+    plausible-looking matrix. Skipped under --partial, which exists for the pilot.
     """
-    n_val, n_train = len(val_meta["h"]), len(train_meta["h"])
-    if (n_val, n_train) != (7000, 28000):
+    n_test, n_train = len(test_meta["h"]), len(train_meta["h"])
+    if (n_test, n_train) != (EXPECTED_TEST_ROWS, EXPECTED_TRAIN_ROWS):
         raise AssertionError(
-            "expected 7,000 val / 28,000 train rows, got {:,} / {:,}".format(n_val, n_train)
+            "expected {:,} test / {:,} train rows, got {:,} / {:,}".format(
+                EXPECTED_TEST_ROWS, EXPECTED_TRAIN_ROWS, n_test, n_train
+            )
         )
 
-    gen, label = val_meta["generator"], val_meta["label"]
-    counts = {g: int(((gen == g) & (label == 1)).sum()) for g in GENERATORS}
-    wrong = {g: n for g, n in counts.items() if n != 500}
-    if wrong:
-        raise AssertionError("expected 500 val fakes per generator, got {}".format(wrong))
+    gen = test_meta["generator"]
+    counts = {g: int((gen == g).sum()) for g in GENERATORS}
+    mismatched = {g: n for g, n in counts.items() if n != TEST_PER_GENERATOR}
+    if mismatched:
+        raise AssertionError(
+            "expected {} test fakes per generator, got {}".format(
+                TEST_PER_GENERATOR, mismatched
+            )
+        )
 
-    n_real = int((label == 0).sum())
-    if n_real != 3500:
-        raise AssertionError("expected 3,500 val reals, got {:,}".format(n_real))
+    n_real = int(_real_mask(gen).sum())
+    if n_real != EXPECTED_TEST_REALS:
+        raise AssertionError(
+            "expected {:,} test reals, got {:,}".format(EXPECTED_TEST_REALS, n_real)
+        )
 
 
 def _report(name, matrix):
@@ -257,32 +318,58 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--cache", required=True, help="aidet/cache dir holding meta/")
+    ap.add_argument("--cache", required=True, help="cache root holding meta/")
     ap.add_argument("--out", default="results/baseline")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--partial",
+        action="store_true",
+        help="score a partial cache (pilot only); shrinks the pools and skips the "
+             "composition check. Results are not comparable to the CNN runs.",
+    )
     args = ap.parse_args()
 
-    val_meta = load_meta(args.cache, "val")
-    train_meta = load_meta(args.cache, "train")
-    print("loaded {} val rows, {} train rows".format(len(val_meta["h"]), len(train_meta["h"])))
+    # No --seed: these rules fit nothing and the evaluation pools are drawn with a fixed
+    # seed, so there is no run-to-run variation for a seed to control.
+    test_meta = load_meta(args.cache, TEST_SPLIT)
+    train_meta = load_meta(args.cache, TRAIN_SPLIT)
+    print("loaded {} test rows, {} train rows".format(len(test_meta["h"]), len(train_meta["h"])))
 
     # Reported because these rows cannot be cropped to 128x128 without upscaling, which
     # resamples them -- the thing the crop strategies exist to avoid. Sizes are all this
     # script reads, so it is unaffected either way.
-    real = val_meta["label"] == 0
-    undersized = int((np.minimum(val_meta["h"], val_meta["w"])[real] < 128).sum())
-    print("  val reals with min(h,w) < 128: {} of {}".format(undersized, int(real.sum())))
+    is_real = _real_mask(test_meta["generator"])
+    short_side = np.minimum(test_meta["h"], test_meta["w"])[is_real]
+    undersized = int((short_side < CACHE_SIZE_PX).sum())
+    print("  test reals with min(h,w) < {}: {} of {}".format(
+        CACHE_SIZE_PX, undersized, int(is_real.sum())))
 
-    _check_composition(val_meta, train_meta)
+    # The pilot scores two shards to confirm the cache is sane before the full build, so a
+    # partial cache has to be runnable. Only the pool sizes and the population check give
+    # way; every other check below still applies.
+    if args.partial:
+        n_fake, n_real = _pilot_pool_sizes(test_meta)
+        print("\n  *** --partial: {} fakes + {} reals per cell, composition check skipped."
+              "\n  *** Pilot output only -- not comparable to the CNN runs. ***".format(
+                  n_fake, n_real))
+    else:
+        n_fake, n_real = FULL_POOL_SIZES
+        _check_composition(test_meta, train_meta)
 
     # SD14 is a category in the source dataset with no rows, so there are seven generators
-    # and not eight. Checked here so the count is never taken on trust.
-    present = set(val_meta["generator"][val_meta["label"] == 1].tolist())
-    assert "SD14" not in present, "SD14 has rows in this cache, so it is not the expected dataset"
-    assert present == set(GENERATORS), "generators in cache: {}".format(sorted(present))
+    # and not eight. Raised rather than asserted, like the other checks that guard whether
+    # the results mean anything, so `python -O` cannot strip it.
+    present_generators = set(test_meta["generator"][~is_real].tolist())
+    if "SD14" in present_generators:
+        raise AssertionError("SD14 has rows in this cache, so it is not the expected dataset")
+    if present_generators != set(GENERATORS):
+        raise AssertionError("generators in cache: {}".format(sorted(present_generators)))
 
-    square_cells, square_full = square_rule_matrix(val_meta, args.seed)
-    lookup_cells, lookup_full = size_lookup_matrix(train_meta, val_meta, args.seed)
+    # Drawn once and handed to both rules: every cell scores this exact block, so no two
+    # cells can differ by which reals they saw.
+    real_idx = select_real_block(test_meta, n_real)
+
+    square_cells, square_full = square_rule_matrix(test_meta, real_idx, n_fake)
+    lookup_cells, lookup_full = size_lookup_matrix(train_meta, test_meta, real_idx, n_fake)
     matrices = {
         "square_rule": (square_cells, square_full),
         "size_lookup": (lookup_cells, lookup_full),
@@ -291,50 +378,47 @@ def main():
     for name, (cells, _) in matrices.items():
         _report(name, cells)
 
-    # Lets anyone scoring against this cache confirm they drew the same reals.
-    print("\nreal selection hash (seed {}): {}".format(
-        args.seed, real_selection_hash(val_meta, seed=args.seed)))
+    # Lets anyone scoring against this cache confirm they drew the same real block.
+    print("\nreal selection hash: {}".format(real_selection_hash(test_meta, real_idx)))
 
-    # Nothing is fitted in the square rule and the real half is fixed, so the source axis
-    # cannot affect any cell -- all 49 must be identical. If they are not, the real
-    # selection is changing between calls and no cell is comparable to any other.
-    distinct = {round(square_cells[src][tgt]["accuracy"], 12) for src in GENERATORS for tgt in GENERATORS}
-    assert len(distinct) == 1, "square-rule cells differ across the grid: {}".format(sorted(distinct))
-
-    # The gate: every generated image is square, so this rule should be near-perfect. A low
-    # score means the metadata is wrong, and everything downstream would be built on it.
-    # Checked before any file is written so a failure leaves no results behind, and taken
-    # from the full pool rather than the 500-sample so it does not depend on the draw.
+    # The gate. Runs before anything is written so a failure leaves no results behind, and
+    # reads the full pool so the number does not depend on which reals were drawn.
     gate_cell = square_full[GENERATORS[0]][GENERATORS[0]]
     gate_accuracy = gate_cell["balanced_accuracy"]
-    print("\nGATE: square-rule balanced accuracy over the full val pool {:.1%}"
+    print("\nGATE: square-rule balanced accuracy over the full test pool {:.1%}"
           "  (TPR {:.1%}, TNR {:.1%}, {} fakes vs {} reals)".format(
               gate_accuracy, gate_cell["tpr"], gate_cell["tnr"],
               gate_cell["n_fake"], gate_cell["n_real"]))
-    if gate_accuracy < 0.97:
-        print("  FAIL -- expected 97-99%. Stop and re-check the cache build before writing anything.")
+    if gate_accuracy < GATE_MIN_ACCURACY:
+        print("  FAIL -- expected at least {:.0%}. Stop and re-check the cache build "
+              "before writing anything.".format(GATE_MIN_ACCURACY))
         return 1
     print("  OK -- the size confound alone nearly solves the task.")
 
-    # Written as {rule}/{source}/seed{n}/metrics.json -- the same directory shape and the
-    # same filename the CNN runs use, so the baseline panels load through exactly the code
-    # path the four strategy panels do instead of needing a special case.
+    # Same directory shape and filename the CNN runs use, so both kinds of panel load
+    # through one code path. seed0 is a fixed path component rather than a run seed --
+    # neither rule has any seed-dependent behavior to vary.
     for name, (cells, full) in matrices.items():
+        summary = _summarize(cells)
         for source in GENERATORS:
-            run_dir = os.path.join(args.out, name, source, "seed{}".format(args.seed))
+            run_dir = os.path.join(args.out, name, source, "seed0")
             os.makedirs(run_dir, exist_ok=True)
             with open(os.path.join(run_dir, "metrics.json"), "w") as f:
                 json.dump(
                     {
                         "strategy": name,
                         "source": source,
-                        "seed": args.seed,
-                        # cells matches the CNN's protocol: 500 fakes + the fixed 500 reals.
+                        "seed": 0,
+                        # Marks pilot output on disk so it cannot be mistaken for a
+                        # reportable run.
+                        "partial": args.partial,
+                        # cells matches the CNN's protocol: the target's fakes plus the
+                        # shared real block.
                         "cells": cells[source],
-                        # full_pool has no CNN counterpart -- it is the whole val population,
+                        # full_pool has no CNN counterpart -- the whole test population,
                         # which only the baseline is cheap enough to score.
                         "full_pool": full[source],
-                        "summary": _summarize(cells),
+                        "summary": summary,
                     },
                     f,
                     indent=2,
