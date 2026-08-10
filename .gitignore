@@ -223,3 +223,10 @@ cache/
 *.npz
 *.pt
 *.pth
+
+# Retained originals from build_cache: keep_shards writes shards/ (the source
+# parquet, ~8.4 GB per split) and keep_native writes native/ (one blob per shard).
+native/
+shards/
+*.bin
+*.parquet

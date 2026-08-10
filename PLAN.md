@@ -68,7 +68,8 @@ Only `data.py` blocks the build. Everything else runs alongside it or after.
 
 ### Setup — 30 min, both
 
-1. Check Drive free space on both accounts — **need ≥ 8 GB**.
+1. Check Drive free space on both accounts — **need ≥ 17 GB** for the defaults we use (6.88 GB cache
+   + 8.36 GB retained source + 1.74 GB native validation), or ≥ 8 GB with `--no-shards`.
 2. Open Colab on both accounts, confirm **a T4 is actually assigned**. Free-tier availability varies;
    if one account is CPU-only, the run split changes tonight, not Monday afternoon.
 3. Ido pushes the skeleton, makes the repo **public**, adds Noa.
@@ -81,7 +82,7 @@ docs/                 # the submitted proposal
 requirements.txt  README.md  PLAN.md
 ```
 
-`requirements.txt`: `torch numpy pillow pyarrow huggingface_hub hf_transfer matplotlib scipy`
+`requirements.txt`: `torch numpy pillow pyarrow huggingface_hub hf_xet matplotlib scipy`
 
 > **Don't install torch locally.** Python here is 3.13.3 and the wheel may not resolve. Try once,
 > then move on — the laptop only needs `numpy` and `Pillow` for the baseline and every figure. All
@@ -108,7 +109,8 @@ finished shards. Peak local disk ~440 MB.
 
 **`load_arm(cache_dir, strategy, source, seed)`** — returns train/eval tensors for one run.
 
-Set `HF_HUB_ENABLE_HF_TRANSFER=1` and `pip install -q hf_transfer`.
+Set `HF_XET_HIGH_PERFORMANCE=1` and `pip install -q hf_xet`. (The dataset is Xet-backed;
+`hf_transfer` was the pre-Xet mechanism and is now deprecated and ignored.)
 
 ### Noa — `src/model.py`, 1.5 h
 
@@ -135,9 +137,15 @@ catch it later.
 **Validation split first, then train.** Val is where every reported cell comes from and it carries
 the metadata Noa needs, so finishing it first lets her start in the morning.
 
-Writes to `/content/drive/MyDrive/aidet/cache/<strategy>/<split>-<shard>.npy` and
-`.../meta/<split>-<shard>.npz`. Output: four uint8 arrays of `(35000,128,128,3)`, 1.72 GB each,
-**6.88 GB total**. The 8.4 GB source never lands on Drive or the laptop.
+Writes to `/content/drive/MyDrive/university/deep_learning/cache/<strategy>/<split>-<shard>.npy`
+and `.../meta/<split>-<shard>.npz`. Output: four uint8 arrays of `(35000,128,128,3)`, 1.72 GB each,
+**6.88 GB total**.
+
+`build_cache` keeps the source parquets by default (`keep_shards=True`), which adds the full
+**8.36 GB** of source to that figure — pass `--no-shards` to drop it. We keep them: Drive has 5 TB,
+and retaining them means a rebuild costs no re-download. Validation is also built with
+`--keep-native`, a further 1.74 GB, so a native-resolution original can be shown beside its 128×128
+crop in the report. Do **not** pass `--keep-native` on train.
 
 Keep the tab open and the laptop awake. If it disconnects, re-run the cell — finished shards are
 skipped, so a disconnect costs one shard.
@@ -147,8 +155,8 @@ skipped, so a disconnect costs one shard.
 **Never** `snapshot_download` the whole repo — that already failed once, and a timeout throws away
 the entire transfer.
 
-**Noa's copy:** share `/MyDrive/aidet/` and use *Add shortcut to Drive*. Costs no quota. Never build
-it twice.
+**Noa's copy:** share `/MyDrive/university/deep_learning/` and use *Add shortcut to Drive*. Costs no
+quota. Never build it twice.
 
 ---
 
