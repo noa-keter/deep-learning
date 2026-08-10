@@ -8,7 +8,7 @@ checks and renders the contact sheet; the fifth check is Ido actually looking at
 the sheet.
 
 Usage:
-    python -m src.pilot --cache-dir /content/drive/MyDrive/aidet/cache --split validation
+    python -m src.pilot --cache-dir /content/drive/MyDrive/university/deep_learning/cache --split validation
 """
 
 from __future__ import annotations

@@ -397,7 +397,7 @@ def build_cache(
         split: Split name as it appears in the parquet filenames, e.g.
             "validation" or "train". Build validation first - it is where every
             reported cell comes from.
-        out_dir: Cache root, e.g. "/content/drive/MyDrive/aidet/cache".
+        out_dir: Cache root, e.g. "/content/drive/MyDrive/university/deep_learning/cache".
         repo_id: HuggingFace dataset id.
         size_px: Output side length.
         seed: Build seed; feeds the per-row `random_crop` RNG.
@@ -1102,7 +1102,7 @@ def _main() -> None:
     CLI entry point: build one split's cache.
 
     Example:
-        python -m src.data --split validation --out-dir /content/drive/MyDrive/aidet/cache
+        python -m src.data --split validation --out-dir /content/drive/MyDrive/university/deep_learning/cache
     """
     import argparse
 
