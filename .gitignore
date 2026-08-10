@@ -230,3 +230,6 @@ native/
 shards/
 *.bin
 *.parquet
+
+# Local editor/tool configuration - machine-specific, not part of the project.
+.claude/
