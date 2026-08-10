@@ -96,8 +96,13 @@ def normalize(x_uint8):
 
     Kept next to the architecture so training and attribution cannot end up on different
     input scales, which would make their gradients incomparable without failing visibly.
+    `train._normalise` is the same expression, character for character, for that reason.
+
+    In-place after the cast: `.float()` on a uint8 source always allocates, so the ops
+    that follow cannot reach back into the cached uint8 arm, and the whole mapping costs
+    one allocation instead of one per operation - ~100 MB a step at the eval batch size.
     """
-    return x_uint8.permute(0, 3, 1, 2).float() / 127.5 - 1.0
+    return x_uint8.permute(0, 3, 1, 2).float().div_(127.5).sub_(1.0)
 
 
 def _smoke_test():
