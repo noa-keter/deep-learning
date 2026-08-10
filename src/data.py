@@ -889,7 +889,7 @@ def _gather(cache_dir: Path, strategy: Strategy, split: str, meta: dict, rows: n
 
 def _choose(pool: np.ndarray, n: int, seed: int, what: str) -> np.ndarray:
     """
-    Pick n rows from a pool without replacement, deterministically.
+    Pick n rows from a pool without replacement, deterministic for a given seed.
 
     Args:
         pool: Candidate global row indices.
