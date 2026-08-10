@@ -386,7 +386,7 @@ def build_cache(
     - `keep_native` writes `native/<stem>.bin`, one append-only blob per shard
       (not one file per image - a Drive FUSE mount is far slower per-file than
       per-byte). Random access by byte offset, readable with Pillow alone, so it
-      works on a laptop with no pyarrow. Read it with :func:`open_native`.
+      works on a laptop with no pyarrow. Read it with func open_native.
 
     Enabling both stores the originals twice. Prefer one.
 
@@ -715,8 +715,8 @@ def native_bytes(cache_dir: str | Path, split: str, row: int, meta: dict | None 
     Args:
         cache_dir: Cache root.
         split: Split name.
-        row: Global row index within the split, matching :func:`load_meta` order.
-        meta: Output of :func:`load_meta`, to avoid re-reading it in a loop.
+        row: Global row index within the split, matching func load_meta order.
+        meta: Output of func load_meta, to avoid re-reading it in a loop.
 
     Returns:
         The encoded image file's bytes.
@@ -748,7 +748,7 @@ def open_native(cache_dir: str | Path, split: str, row: int, meta: dict | None =
         cache_dir: Cache root.
         split: Split name.
         row: Global row index within the split.
-        meta: Output of :func:`load_meta`, to avoid re-reading it in a loop.
+        meta: Output of func load_meta, to avoid re-reading it in a loop.
 
     Returns:
         An open PIL image at its original size.
@@ -833,7 +833,7 @@ def _check_label_agrees(label: np.ndarray, is_real: np.ndarray) -> None:
 
     Args:
         label: Per-row label strings.
-        is_real: Boolean mask from :func:`_real_mask`.
+        is_real: Boolean mask from func _real_mask.
 
     Raises:
         ValueError: If either class carries more than one label value, or both
@@ -858,7 +858,7 @@ def _gather(cache_dir: Path, strategy: Strategy, split: str, meta: dict, rows: n
         cache_dir: Cache root.
         strategy: One of STRATEGIES.
         split: Split name.
-        meta: Output of :func:`load_meta` for that split.
+        meta: Output of func load_meta for that split.
         rows: Global row indices to gather, in the order wanted.
 
     Returns:
@@ -938,7 +938,7 @@ def load_arm_numpy(
     test_split: str = "validation",
 ) -> tuple[np.ndarray, ...]:
     """
-    Build one arm as numpy arrays - the torch-free core of :func:`load_arm`.
+    Build one arm as numpy arrays - the torch-free core of func load_arm.
 
     Train: `train_per_class` fakes from `source` plus the same number of real
     images, the real pool drawn with REAL_POOL_SEED so it is identical in every
@@ -1067,7 +1067,7 @@ def load_arm(
         train_per_class: Training images per class.
 
     Returns:
-        An :class:`Arm`.
+        An Arm.
     """
     import torch
 
