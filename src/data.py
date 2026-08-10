@@ -106,7 +106,7 @@ _BILINEAR: Final = Image.Resampling.BILINEAR
 
 #: Set at module import, which only helps if this module is imported before
 #: huggingface_hub - see the check in `build_cache`.
-os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
 
 
 class Arm(NamedTuple):
@@ -410,7 +410,7 @@ def build_cache(
     """
     # Before the import, not after: huggingface_hub latches this into its constants
     # at import time, so assigning it afterwards is a no-op.
-    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+    os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"
 
     # Lazy: the laptop imports this module with numpy + Pillow only.
     import pyarrow.parquet as pq
@@ -418,11 +418,15 @@ def build_cache(
     from importlib.util import find_spec
     from huggingface_hub import HfApi, hf_hub_download
 
-    # Roughly 20 min versus 3 h, so report which is about to happen. A notebook that
-    # imported huggingface_hub first latched the old value; only a restart clears it.
-    enabled = getattr(getattr(hub, "constants", None), "HF_HUB_ENABLE_HF_TRANSFER", None)
-    if enabled is False or (enabled and not find_spec("hf_transfer")):
-        print("[build_cache] WARNING: hf_transfer inactive, download will be slow", flush=True)
+    # Roughly 20 min versus 3 h, so report which is about to happen. The repo is
+    # Xet-backed, so the fast path is hf_xet; without it the download falls back to
+    # plain HTTPS. `hf_transfer` was the pre-Xet mechanism and is no longer consulted.
+    # A notebook that imported huggingface_hub first latched the old value; only a
+    # restart clears it.
+    if find_spec("hf_xet") is None:
+        print("[build_cache] WARNING: hf_xet not installed, download will be slow", flush=True)
+    elif getattr(getattr(hub, "constants", None), "HF_XET_HIGH_PERFORMANCE", None) is False:
+        print("[build_cache] WARNING: HF_XET_HIGH_PERFORMANCE off, download will be slower", flush=True)
 
     out_root = Path(out_dir)
     optional_dirs = (*(("native",) if keep_native else ()), *(("shards",) if keep_shards else ()))

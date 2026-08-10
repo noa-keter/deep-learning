@@ -81,7 +81,7 @@ docs/                 # the submitted proposal
 requirements.txt  README.md  PLAN.md
 ```
 
-`requirements.txt`: `torch numpy pillow pyarrow huggingface_hub hf_transfer matplotlib scipy`
+`requirements.txt`: `torch numpy pillow pyarrow huggingface_hub hf_xet matplotlib scipy`
 
 > **Don't install torch locally.** Python here is 3.13.3 and the wheel may not resolve. Try once,
 > then move on — the laptop only needs `numpy` and `Pillow` for the baseline and every figure. All
@@ -108,7 +108,8 @@ finished shards. Peak local disk ~440 MB.
 
 **`load_arm(cache_dir, strategy, source, seed)`** — returns train/eval tensors for one run.
 
-Set `HF_HUB_ENABLE_HF_TRANSFER=1` and `pip install -q hf_transfer`.
+Set `HF_XET_HIGH_PERFORMANCE=1` and `pip install -q hf_xet`. (The dataset is Xet-backed;
+`hf_transfer` was the pre-Xet mechanism and is now deprecated and ignored.)
 
 ### Noa — `src/model.py`, 1.5 h
 
