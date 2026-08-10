@@ -84,9 +84,9 @@ REAL_TAG: Final[str] = "REAL"
 
 DEFAULT_REPO_ID: Final[str] = "TheKernel01/Tiny-GenImage"
 
-#: The real pool is drawn with a *fixed* seed, never the run seed, so that every
-#: cell of the transfer matrix sees byte-identical real images and any difference
-#: between cells is attributable to the generator alone.
+#: The **test** pools are drawn with this fixed seed, never the run seed, so every
+#: cell of every matrix sees byte-identical images and a difference between cells
+#: is attributable to the generator alone. Training pools use the run seed instead.
 REAL_POOL_SEED: Final[int] = 20260809
 
 TRAIN_PER_CLASS: Final[int] = 2_000
@@ -941,19 +941,28 @@ def load_arm_numpy(
     Build one arm as numpy arrays - the torch-free core of func load_arm.
 
     Train: `train_per_class` fakes from `source` plus the same number of real
-    images, the real pool drawn with REAL_POOL_SEED so it is identical in every
-    cell. VAL_FRACTION of it is split off, stratified by class and shuffled with
-    the run `seed`, for checkpoint selection only.
+    images, both pools drawn with the run `seed`, so the training sample moves
+    between seeds and the seed-to-seed spread reflects sampling variability and
+    not weight init alone. Note this bites only where a pool is larger than the
+    request: at the default `train_per_class` the train split holds exactly 2,000
+    fakes per generator, so the fake half is exhaustive and identical across seeds,
+    and in practice only the real half (2,000 of 14,000) moves. VAL_FRACTION is
+    then split off, stratified by class and shuffled with the same seed, for
+    checkpoint selection only. Selection is keyed by seed and generator and never
+    by strategy, so within one seed all four strategies train on the same rows.
 
     Test: TEST_PER_GENERATOR fakes for each of the seven generators, then a fixed
-    TEST_REAL_N real block shared by all seven cells. It never influences model
-    selection - that is what the validation carve-out above is for.
+    TEST_REAL_N real block shared by all seven cells, both drawn with
+    REAL_POOL_SEED so every cell of every matrix sees byte-identical images. The
+    test set never influences model selection - that is what the validation
+    carve-out above is for - and never moves with the seed.
 
     Args:
         cache_dir: Cache root.
         strategy: One of STRATEGIES.
         source: Generator the detector is trained on; must be in GENERATORS.
-        seed: Run seed; controls only the train/val split and its shuffle.
+        seed: Run seed; selects which training images are drawn and controls the
+            train/val split and its shuffle. The test set is independent of it.
         train_per_class: Training images per class - halve it if the calibration
             run comes in slow.
         train_split: Dataset split to train from.
@@ -976,15 +985,15 @@ def load_arm_numpy(
     train_real = _real_mask(train_meta["generator"])
     _check_label_agrees(train_meta["label"], train_real)
 
+    # Keyed by seed and generator, never by strategy: within one seed all four
+    # strategies draw the same rows, so the strategy comparison stays paired.
     fake_rows = _choose(
         np.flatnonzero(train_meta["generator"] == source),
         train_per_class,
-        REAL_POOL_SEED,
+        seed,
         f"train fakes for {source}",
     )
-    real_rows = _choose(
-        np.flatnonzero(train_real), train_per_class, REAL_POOL_SEED, "train real pool"
-    )
+    real_rows = _choose(np.flatnonzero(train_real), train_per_class, seed, "train real pool")
 
     x_fit = _gather(root, strategy, train_split, train_meta, np.concatenate([fake_rows, real_rows]))
     y_fit = np.concatenate(
@@ -1062,7 +1071,7 @@ def load_arm(
         cache_dir: Cache root.
         strategy: One of STRATEGIES.
         source: Generator to train on.
-        seed: Run seed.
+        seed: Run seed; selects the training sample and the train/val split.
         device: Destination device for the tensors.
         train_per_class: Training images per class.
 
