@@ -1,0 +1,120 @@
+{
+  "strategy": "size_lookup",
+  "source": "VQDM",
+  "seed": 0,
+  "partial": false,
+  "cells": {
+    "ADM": {
+      "accuracy": 1.0,
+      "tpr": 1.0,
+      "tnr": 1.0,
+      "n": 1000
+    },
+    "BigGAN": {
+      "accuracy": 0.5,
+      "tpr": 0.0,
+      "tnr": 1.0,
+      "n": 1000
+    },
+    "GLIDE": {
+      "accuracy": 1.0,
+      "tpr": 1.0,
+      "tnr": 1.0,
+      "n": 1000
+    },
+    "Midjourney": {
+      "accuracy": 0.5,
+      "tpr": 0.0,
+      "tnr": 1.0,
+      "n": 1000
+    },
+    "SD15": {
+      "accuracy": 0.5,
+      "tpr": 0.0,
+      "tnr": 1.0,
+      "n": 1000
+    },
+    "VQDM": {
+      "accuracy": 1.0,
+      "tpr": 1.0,
+      "tnr": 1.0,
+      "n": 1000
+    },
+    "Wukong": {
+      "accuracy": 0.5,
+      "tpr": 0.0,
+      "tnr": 1.0,
+      "n": 1000
+    }
+  },
+  "full_pool": {
+    "ADM": {
+      "accuracy": 1.0,
+      "tpr": 1.0,
+      "tnr": 1.0,
+      "n": 4000,
+      "balanced_accuracy": 1.0,
+      "n_fake": 500,
+      "n_real": 3500
+    },
+    "BigGAN": {
+      "accuracy": 0.875,
+      "tpr": 0.0,
+      "tnr": 1.0,
+      "n": 4000,
+      "balanced_accuracy": 0.5,
+      "n_fake": 500,
+      "n_real": 3500
+    },
+    "GLIDE": {
+      "accuracy": 1.0,
+      "tpr": 1.0,
+      "tnr": 1.0,
+      "n": 4000,
+      "balanced_accuracy": 1.0,
+      "n_fake": 500,
+      "n_real": 3500
+    },
+    "Midjourney": {
+      "accuracy": 0.875,
+      "tpr": 0.0,
+      "tnr": 1.0,
+      "n": 4000,
+      "balanced_accuracy": 0.5,
+      "n_fake": 500,
+      "n_real": 3500
+    },
+    "SD15": {
+      "accuracy": 0.875,
+      "tpr": 0.0,
+      "tnr": 1.0,
+      "n": 4000,
+      "balanced_accuracy": 0.5,
+      "n_fake": 500,
+      "n_real": 3500
+    },
+    "VQDM": {
+      "accuracy": 1.0,
+      "tpr": 1.0,
+      "tnr": 1.0,
+      "n": 4000,
+      "balanced_accuracy": 1.0,
+      "n_fake": 500,
+      "n_real": 3500
+    },
+    "Wukong": {
+      "accuracy": 0.875,
+      "tpr": 0.0,
+      "tnr": 1.0,
+      "n": 4000,
+      "balanced_accuracy": 0.5,
+      "n_fake": 500,
+      "n_real": 3500
+    }
+  },
+  "summary": {
+    "diagonal_mean": 1.0,
+    "off_diagonal_mean": 0.6190476190476191,
+    "gap": 0.38095238095238093
+  }
+}
