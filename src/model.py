@@ -96,7 +96,7 @@ def normalize(x_uint8):
 
     Kept next to the architecture so training and attribution cannot end up on different
     input scales, which would make their gradients incomparable without failing visibly.
-    `train._normalise` is the same expression, character for character, for that reason.
+    `train._normalize` is the same expression, character for character, for that reason.
 
     In-place after the cast: `.float()` on a uint8 source always allocates, so the ops
     that follow cannot reach back into the cached uint8 arm, and the whole mapping costs

@@ -1,8 +1,8 @@
 """
-Pilot verification for the equalisation cache - run it after two shards, before
+Pilot verification for the equalization cache - run it after two shards, before
 committing the full build.
 
-PLAN.md: "A colour-channel swap or transposed axis costs 5 minutes to catch here,
+PLAN.md: "A color-channel swap or transposed axis costs 5 minutes to catch here,
 and 28 ruined runs if you catch it later." This module does the four mechanical
 checks and renders the contact sheet; the fifth check is Ido actually looking at
 the sheet.

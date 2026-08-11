@@ -1,7 +1,7 @@
 # Plan — Resolution Bias and Cross-Generator Detection of AI-Generated Images
 
 Train a small CNN from scratch to tell real photos from AI-generated ones, and measure how the
-answer changes depending on how you equalise image size. Four strategies × 7 source generators,
+answer changes depending on how you equalize image size. Four strategies × 7 source generators,
 evaluated on all 7 → four 7×7 transfer matrices.
 
 **Target: Tue 11 Aug 2026.** Self-imposed; there is no course deadline. The project is 80 % of the
@@ -19,7 +19,7 @@ experiment and the analysis — the spec requires each member to answer question
 | | **Ido** | **Noa** |
 |---|---|---|
 | **Code** | `data.py` (cache + 4 transforms) · `train.py` | `model.py` (CompactCNN) · `baseline.py` |
-| **Runs** | `centre_crop`, `rescale` — 14/seed | `pad`, `random_crop` — 14/seed |
+| **Runs** | `center_crop`, `rescale` — 14/seed | `pad`, `random_crop` — 14/seed |
 | **Figures** | Transfer matrices · the ranking result | Attribution · spectra |
 | **Report** | Motivation · Models & hyperparameters · Results · repo link | Related work · Data · Analysis · Discussion · References |
 | **Also** | README + reproducibility | Contribution table |
@@ -39,7 +39,7 @@ Against `הנחיות לפרויקט בקורס למידה עמוקה 2026ב`. A
 | Substantive training | 56 training runs |
 | Clear baseline | Dimension rule, reported per 7×7 cell |
 | Appropriate metrics | Per-cell accuracy (classes balanced) + binomial SE ±1.6 pp |
-| `השוואה בין שיטות/מודלים` | Four equalisation **methods** across the grid. The slash is "or" — one architecture is correct here, since holding the model fixed is what isolates the preprocessing effect |
+| `השוואה בין שיטות/מודלים` | Four equalization **methods** across the grid. The slash is "or" — one architecture is correct here, since holding the model fixed is what isolates the preprocessing effect |
 | Deep analysis | Ranking + Spearman ρ + attribution + spectra, ≥2 seeds |
 | Reproducibility | README, fixed seeds, one-command reproduction |
 | Public repo link | This repo |
@@ -97,7 +97,7 @@ everything downstream depends on them.
 
 | Strategy | Definition | Resamples? |
 |---|---|---|
-| `centre_crop` | Central 128×128 window of the native image | No |
+| `center_crop` | Central 128×128 window of the native image | No |
 | `random_crop` | 128×128 window at a random top-left, drawn **once per image**, RNG seeded by row index | No |
 | `rescale` | `img.resize((128,128), BILINEAR)` | Yes |
 | `pad` | Long side → 128 keeping aspect, then zero-pad to square | Yes, plus a border |
@@ -124,7 +124,7 @@ from generated is high-frequency, so downsampling early would throw it away befo
 
 ### Ido — pilot 2 shards, then verify — 30 min. **Do not skip.**
 
-A colour-channel swap or transposed axis costs 5 minutes to catch here, and 28 ruined runs if you
+A color-channel swap or transposed axis costs 5 minutes to catch here, and 28 ruined runs if you
 catch it later.
 
 - Row counts and split sizes match the shard header
@@ -166,7 +166,7 @@ quota. Never build it twice.
 
 **Ido — `src/train.py`, 2.5 h.** AdamW, lr 3e-4, weight decay 1e-4, cosine to 0, batch 128,
 40 epochs, AMP, BCE-with-logits. **Horizontal flip only** — every other augmentation resamples or
-re-encodes, which would inject the very artefact under study. That's a methodological point; put it
+re-encodes, which would inject the very artifact under study. That's a methodological point; put it
 in the report.
 
 **No DataLoader.** An arm is ~390 MB of uint8: push it to the GPU once and index it. Faster, and
@@ -190,7 +190,7 @@ Report both per 7×7 cell, so they sit alongside the CNN matrices.
 
 ### Midday — calibration run, 30 min, Ido
 
-One real run: `centre_crop` / `BigGAN` / seed 0.
+One real run: `center_crop` / `BigGAN` / seed 0.
 
 | Time per run | Then |
 |---|---|
@@ -203,7 +203,7 @@ commit 28 runs to it.
 
 ### Afternoon — seed 0, 28 runs, ~2 h, both in parallel
 
-Ido runs `centre_crop` + `rescale`; Noa runs `pad` + `random_crop`. 14 each.
+Ido runs `center_crop` + `rescale`; Noa runs `pad` + `random_crop`. 14 each.
 
 `notebooks/01_run_matrix.ipynb`: clone → mount Drive → loop over the seven sources. The entire resume
 mechanism is `if metrics.json exists: continue`.
@@ -213,7 +213,7 @@ repo. That's it — no large transfers between accounts, ever.
 
 ### Evening — figures, ~3 h, split
 
-**Ido — matrices and the ranking.** Four 7×7 heatmaps on a shared colour scale, plus the baseline as
+**Ido — matrices and the ranking.** Four 7×7 heatmaps on a shared color scale, plus the baseline as
 a fifth panel. Report per-arm diagonal mean, off-diagonal mean, and **the gap between them** — that
 gap is the cross-generator failure the project is about.
 

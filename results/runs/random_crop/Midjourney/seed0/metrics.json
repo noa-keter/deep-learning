@@ -37,7 +37,7 @@
     "scheduler": "CosineAnnealingLR(eta_min=0)",
     "loss": "binary_cross_entropy_with_logits",
     "augmentation": "horizontal_flip_p0.5",
-    "normalisation": "uint8/255 -> (x - 0.5) / 0.5",
+    "normalization": "uint8/255 -> (x - 0.5) / 0.5",
     "train_per_class": 2000,
     "n_train": 3600,
     "n_val": 400,

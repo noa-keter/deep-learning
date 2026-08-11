@@ -24,7 +24,7 @@ the same fixed 500 real images shared by all seven cells. Exactly balanced, so
 plain accuracy is honest and the binomial SE at n=1,000 is ~1.6 pp at p=0.5.
 
 Usage:
-    python -m src.train --strategy centre_crop --source BigGAN --seed 0 \
+    python -m src.train --strategy center_crop --source BigGAN --seed 0 \
         --cache-dir /content/drive/MyDrive/university/deep_learning/cache
 
 Requires torch >= 2.4 for the `torch.amp` entry points used below.
@@ -59,12 +59,12 @@ BATCH_SIZE: Final[int] = 128
 LEARNING_RATE: Final[float] = 3e-4
 WEIGHT_DECAY: Final[float] = 1e-4
 
-#: Inference only, so it is bounded by VRAM rather than by optimisation.
+#: Inference only, so it is bounded by VRAM rather than by optimization.
 EVAL_BATCH_SIZE: Final[int] = 512
 
-#: The only augmentation. Every other candidate - rotation, scale jitter, colour
+#: The only augmentation. Every other candidate - rotation, scale jitter, color
 #: jitter, JPEG augmentation - resamples or re-encodes, which would inject the
-#: exact artefact this study measures. A methodological choice, not laziness.
+#: exact artifact this study measures. A methodological choice, not laziness.
 FLIP_PROBABILITY: Final[float] = 0.5
 
 #: Images arrive as uint8 and are mapped to [-1, 1] by `x / 127.5 - 1`. Kept
@@ -225,7 +225,7 @@ def _device_type(device: str) -> str:
     return "cuda" if device.startswith("cuda") else "cpu"
 
 
-def _normalise(images: Tensor) -> Tensor:
+def _normalize(images: Tensor) -> Tensor:
     """
     Turn a uint8 NHWC batch into a float NCHW batch in [-1, 1].
 
@@ -288,7 +288,7 @@ def _predict(model: Module, images: Tensor, device: str, batch_size: int) -> np.
     out: list[np.ndarray] = []
     with torch.no_grad():
         for start in range(0, len(images), batch_size):
-            batch = _normalise(images[start : start + batch_size])
+            batch = _normalize(images[start : start + batch_size])
             with torch.autocast(device_type, dtype=torch.float16, enabled=device_type == "cuda"):
                 logits = _forward_logits(model, batch)
             predicted = (logits > DECISION_LOGIT).to(torch.float32)
@@ -352,7 +352,7 @@ def _validation_scores(
     correct = 0
     with torch.no_grad():
         for start in range(0, len(x_val), batch_size):
-            batch = _normalise(x_val[start : start + batch_size])
+            batch = _normalize(x_val[start : start + batch_size])
             targets = y_val[start : start + batch_size]
             with torch.autocast(device_type, dtype=torch.float16, enabled=device_type == "cuda"):
                 logits = _forward_logits(model, batch)
@@ -383,7 +383,7 @@ def train_one(
     CUDA, horizontal flip as the only augmentation. The best epoch is chosen by
     accuracy on the internal validation carve-out - ties broken by the lower loss,
     which matters because that set holds only ~400 images and its accuracy is
-    therefore quantised to 0.25 pp. The test set is not touched until the loop is
+    therefore quantized to 0.25 pp. The test set is not touched until the loop is
     over.
 
     Args:
@@ -393,7 +393,7 @@ def train_one(
         seed: Run seed. Seeds torch, and selects the arm's training sample and its
             train/validation split. The test set is independent of it.
         epochs: Training epochs; the cosine schedule spans exactly this many.
-        batch_size: Optimiser batch size.
+        batch_size: Optimizer batch size.
         learning_rate: AdamW learning rate.
         weight_decay: AdamW weight decay.
         train_per_class: Training images per class - halve it if the calibration
@@ -408,7 +408,7 @@ def train_one(
             explicit path to put one elsewhere.
 
     Returns:
-        A JSON-serialisable dict with `strategy`, `source`, `seed`, `cells`
+        A JSON-serializable dict with `strategy`, `source`, `seed`, `cells`
         (generator -> accuracy), `cell_sizes`, `in_domain`, `val_accuracy`,
         `best_epoch`, `wall_clock_s`, `load_s`, `peak_vram_mb`, `checkpoint` and
         `config`.
@@ -457,7 +457,7 @@ def train_one(
         train_loss = 0.0
         for start in range(0, len(perm), batch_size):
             index = perm[start : start + batch_size]
-            batch = _normalise(arm.x_train[index])
+            batch = _normalize(arm.x_train[index])
             # The only augmentation. dims=[3] is width in NCHW - a horizontal flip.
             flip = torch.rand(len(index), device=device) < FLIP_PROBABILITY
             batch[flip] = torch.flip(batch[flip], dims=[3])
@@ -474,7 +474,7 @@ def train_one(
 
         val_accuracy, val_loss = _validation_scores(model, arm.x_val, arm.y_val, device, EVAL_BATCH_SIZE)
         # Strictly better, or an equal accuracy at a lower loss: 400 validation
-        # images quantise accuracy to 0.25 pp, so ties are common and the loss is
+        # images quantize accuracy to 0.25 pp, so ties are common and the loss is
         # what separates them.
         if val_accuracy > best_accuracy or (val_accuracy == best_accuracy and val_loss < best_loss):
             best_accuracy, best_loss, best_epoch = val_accuracy, val_loss, epoch
@@ -531,7 +531,7 @@ def train_one(
             "scheduler": "CosineAnnealingLR(eta_min=0)",
             "loss": "binary_cross_entropy_with_logits",
             "augmentation": "horizontal_flip_p0.5",
-            "normalisation": "uint8/255 -> (x - 0.5) / 0.5",
+            "normalization": "uint8/255 -> (x - 0.5) / 0.5",
             "train_per_class": train_per_class,
             "n_train": int(len(arm.x_train)),
             "n_val": int(len(arm.x_val)),
@@ -557,7 +557,7 @@ def _main() -> None:
     CLI entry point: run one cell of the matrix and write its metrics.
 
     Example:
-        python -m src.train --strategy centre_crop --source BigGAN --seed 0 \
+        python -m src.train --strategy center_crop --source BigGAN --seed 0 \
             --cache-dir /content/drive/MyDrive/university/deep_learning/cache
     """
     import argparse

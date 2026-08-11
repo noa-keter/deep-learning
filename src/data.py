@@ -1,5 +1,5 @@
 """
-Data layer for the resolution-bias study: the four equalisation transforms, the
+Data layer for the resolution-bias study: the four equalization transforms, the
 shard-by-shard cache builder, and the per-run arm loader.
 
 This is the only module that touches image bytes. It is importable on a laptop
@@ -59,8 +59,8 @@ __all__ = [
     "shard_paths",
 ]
 
-Strategy = Literal["centre_crop", "random_crop", "rescale", "pad"]
-STRATEGIES: Final[tuple[Strategy, ...]] = ("centre_crop", "random_crop", "rescale", "pad")
+Strategy = Literal["center_crop", "random_crop", "rescale", "pad"]
+STRATEGIES: Final[tuple[Strategy, ...]] = ("center_crop", "random_crop", "rescale", "pad")
 
 #: Largest resampling-free common size the dataset admits: BigGAN is 128x128 native.
 CACHE_SIZE_PX: Final[int] = 128
@@ -141,7 +141,7 @@ class Arm(NamedTuple):
 
 
 # --------------------------------------------------------------------------- #
-# The four equalisation transforms
+# The four equalization transforms
 # --------------------------------------------------------------------------- #
 
 
@@ -154,16 +154,16 @@ def equalize(
     """
     Reduce an image to a fixed size_px x size_px RGB array by one strategy.
 
-    Behaviour on images whose native size is smaller than `size_px` on one or
+    Behavior on images whose native size is smaller than `size_px` on one or
     both axes (expected count on Tiny-GenImage: zero, since the smallest native
     size is BigGAN at 128x128 - the pilot counts and reports any):
 
-    - `centre_crop`: the crop window is centred and extends past the image edge;
+    - `center_crop`: the crop window is centered and extends past the image edge;
       the deficit is zero-padded symmetrically. It is **not** upsampled, because
-      upsampling would inject the very resampling artefact the crop arms exist to
+      upsampling would inject the very resampling artifact the crop arms exist to
       avoid.
     - `random_crop`: the window origin is drawn from `[min(w - size, 0),
-      max(w - size, 0)]`, so an undersized axis randomises how the zero padding
+      max(w - size, 0)]`, so an undersized axis randomizes how the zero padding
       is split between the two sides. Same no-upsampling rationale.
     - `rescale`, `pad`: resample as usual, upscaling if needed. Both arms already
       resample by definition, so there is nothing to protect.
@@ -183,7 +183,7 @@ def equalize(
     img = img.convert("RGB")
     width_px, height_px = img.size
 
-    if strategy == "centre_crop":
+    if strategy == "center_crop":
         left = (width_px - size_px) // 2
         top = (height_px - size_px) // 2
         out = img.crop((left, top, left + size_px, top + size_px))
@@ -316,7 +316,7 @@ def _cell_bytes(cell: object) -> bytes:
 
     These are the bytes `build_cache` archives when `keep_native` is on. They are
     never decoded and re-encoded on the way to disk: a JPEG round-trip would add
-    compression artefacts, which is precisely the class of signal this project
+    compression artifacts, which is precisely the class of signal this project
     measures.
 
     Args:
@@ -327,7 +327,7 @@ def _cell_bytes(cell: object) -> bytes:
         The encoded image file's bytes.
 
     Raises:
-        TypeError: If the cell shape is not recognised.
+        TypeError: If the cell shape is not recognized.
     """
     # HF Image struct; bytes inline is this dataset's case - an assumption the pilot
     # confirms. `path` is used when the dataset references files on disk.
@@ -341,7 +341,7 @@ def _cell_bytes(cell: object) -> bytes:
         return bytes(cell)
     if isinstance(cell, str):
         return Path(cell).read_bytes()
-    raise TypeError(f"unrecognised image cell type: {type(cell)!r}")
+    raise TypeError(f"unrecognized image cell type: {type(cell)!r}")
 
 
 def _open_image(cell: object) -> Image.Image:
@@ -851,7 +851,7 @@ def _gather(cache_dir: Path, strategy: Strategy, split: str, meta: dict, rows: n
     """
     Read selected rows out of a split's cached shards without loading all of them.
 
-    Shards are memory-mapped and only the requested rows are materialised - an
+    Shards are memory-mapped and only the requested rows are materialized - an
     arm is 4,000 of 28,000 rows, so this reads ~200 MB instead of 1.4 GB.
 
     Args:
@@ -1061,7 +1061,7 @@ def load_arm(
     Load one (strategy, source, seed) arm as torch tensors.
 
     Images stay uint8 and NHWC; `train.py` moves them to the GPU once and does the
-    permute/normalise per batch. The whole arm is ~390 MB, small enough to live in
+    permute/normalize per batch. The whole arm is ~390 MB, small enough to live in
     T4 VRAM, which is why there is no DataLoader anywhere in this project.
 
     torch is imported inside this function on purpose: every other function in
@@ -1115,7 +1115,7 @@ def _main() -> None:
     """
     import argparse
 
-    parser = argparse.ArgumentParser(description="Build the Tiny-GenImage equalisation cache.")
+    parser = argparse.ArgumentParser(description="Build the Tiny-GenImage equalization cache.")
     parser.add_argument("--split", default="validation", help="validation first, then train")
     parser.add_argument("--out-dir", required=True, type=Path)
     parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
