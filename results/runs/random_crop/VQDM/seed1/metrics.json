@@ -1,0 +1,51 @@
+{
+  "strategy": "random_crop",
+  "source": "VQDM",
+  "seed": 1,
+  "cells": {
+    "ADM": 0.717,
+    "BigGAN": 0.717,
+    "GLIDE": 0.773,
+    "Midjourney": 0.703,
+    "SD15": 0.684,
+    "VQDM": 0.858,
+    "Wukong": 0.664
+  },
+  "cell_sizes": {
+    "ADM": 1000,
+    "BigGAN": 1000,
+    "GLIDE": 1000,
+    "Midjourney": 1000,
+    "SD15": 1000,
+    "VQDM": 1000,
+    "Wukong": 1000
+  },
+  "in_domain": 0.858,
+  "off_domain_mean": 0.7096666666666667,
+  "val_accuracy": 0.865,
+  "best_epoch": 38,
+  "wall_clock_s": 115.35593929400011,
+  "load_s": 2.509169851000024,
+  "peak_vram_mb": 9853.065216,
+  "checkpoint": "results/runs/random_crop/VQDM/seed1/model.pt",
+  "config": {
+    "epochs": 40,
+    "batch_size": 128,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.0001,
+    "optimizer": "AdamW",
+    "scheduler": "CosineAnnealingLR(eta_min=0)",
+    "loss": "binary_cross_entropy_with_logits",
+    "augmentation": "horizontal_flip_p0.5",
+    "normalisation": "uint8/255 -> (x - 0.5) / 0.5",
+    "train_per_class": 2000,
+    "n_train": 3600,
+    "n_val": 400,
+    "n_test": 4000,
+    "selection_metric": "internal val accuracy, ties by lower loss",
+    "amp": "float16",
+    "device": "cuda",
+    "torch_version": "2.11.0+cu128",
+    "cache_dir": "/content/drive/MyDrive/university/deep_learning/cache"
+  }
+}
