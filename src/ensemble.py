@@ -35,15 +35,26 @@ is not describing the reported models and no ensemble number in it means anythin
 
 from __future__ import annotations
 
+import json
 import numpy as np
 from pathlib import Path
 from typing import Final, NamedTuple
 
 from src.logits import split_key
-from src.train import DECISION_LOGIT
+from src.rotation import CELL_ROWS
+from src.train import DECISION_LOGIT, DEFAULT_RESULTS_DIR
 from src.data import GENERATORS, REAL_TAG
 
-__all__ = ["Scored", "combine", "is_run_key", "score", "select", "verify_single_arms"]
+__all__ = [
+    "Scored",
+    "cell_accuracies",
+    "combine",
+    "is_run_key",
+    "score",
+    "seeds_in",
+    "select",
+    "verify_single_arms",
+]
 
 #: Never ensembled. `pad`'s model reads the black border that real photos get and the
 #: generators never do, so including it would raise the number using the giveaway that
@@ -158,6 +169,47 @@ def combine(dump, keys, orientations=(0,)) -> np.ndarray:
     return np.mean(np.concatenate(stacked, axis=0), axis=0)
 
 
+def seeds_in(dump) -> tuple[int, ...]:
+    """
+    Which seeds a dump holds runs for.
+
+    Args:
+        dump: The loaded `.npz` (or any mapping).
+
+    Returns:
+        The seeds present, ascending.
+    """
+    keys = dump.files if hasattr(dump, "files") else dump.keys()
+    return tuple(sorted({split_key(k)[2] for k in keys if is_run_key(k)}))
+
+
+def cell_accuracies(scores, truth, gen_ids) -> dict[str, float]:
+    """
+    Accuracy on each generator's cell: its fakes plus the shared real block.
+
+    Args:
+        scores: (n_test,) combined logits.
+        truth: (n_test,) true labels, 1.0 synthetic.
+        gen_ids: (n_test,) generator tags, REAL_TAG for the shared real block.
+
+    Returns:
+        generator -> accuracy over CELL_ROWS rows.
+
+    Raises:
+        ValueError: If a generator block is missing.
+    """
+    correct = (scores > DECISION_LOGIT).astype(np.float64) == truth
+    is_real = gen_ids == REAL_TAG
+
+    accuracies = {}
+    for generator in GENERATORS:
+        mask = (gen_ids == generator) | is_real
+        if not mask.any():
+            raise ValueError(f"no test rows for {generator}")
+        accuracies[generator] = float(correct[mask].mean())
+    return accuracies
+
+
 def score(scores, truth, gen_ids, source, label="") -> Scored:
     """
     Turn combined scores into one source generator's transfer numbers.
@@ -178,17 +230,9 @@ def score(scores, truth, gen_ids, source, label="") -> Scored:
     if source not in GENERATORS:
         raise ValueError(f"unknown source {source!r}")
 
-    predicted = (scores > DECISION_LOGIT).astype(np.float64)
-    correct = predicted == truth
+    cells = cell_accuracies(scores, truth, gen_ids)
+    correct = (scores > DECISION_LOGIT).astype(np.float64) == truth
     is_real = gen_ids == REAL_TAG
-
-    cells = {}
-    for generator in GENERATORS:
-        mask = (gen_ids == generator) | is_real
-        if not mask.any():
-            raise ValueError(f"no test rows for {generator}")
-        cells[generator] = float(correct[mask].mean())
-
     off_mask = ~is_real & (gen_ids != source)
     return Scored(
         label=label,
@@ -225,12 +269,20 @@ def evaluate(dump, arms, orientations, label, seeds=None) -> Scored:
     """
     Score one combination across every source generator present.
 
+    **Seeds are averaged as accuracies, one seed at a time - never as logits.** A cell holds
+    two checkpoints, and pooling their scores into one mean logit would silently make every
+    row of the table a two-model ensemble: the `center_crop alone` baseline would be a
+    seed-ensemble, and `center_crop + rescale` a four-model one, so the table would compare
+    four models against two and call the difference a cross-arm effect. The seed spread is
+    the error bar and stays outside the matrices, exactly as the module docstring says.
+
     Args:
         dump: The loaded `.npz`.
-        arms: Strategies to average over.
+        arms: Strategies to average over, within a seed.
         orientations: Orientation rows to average over.
         label: Name for the resulting row.
-        seeds: Seeds to average over; `None` uses every seed present.
+        seeds: Seeds to report over; `None` uses every seed present. Pass a single seed to
+            get that one model's row, which is what the error-bar block wants.
 
     Returns:
         The averaged row.
@@ -240,42 +292,99 @@ def evaluate(dump, arms, orientations, label, seeds=None) -> Scored:
     """
     truth = np.asarray(dump["y_test"], dtype=np.float64)
     gen_ids = np.asarray(dump["gen_ids"]).astype(str)
+    keys = dump.files if hasattr(dump, "files") else dump.keys()
 
-    grouped = select(dump.files if hasattr(dump, "files") else dump.keys(), arms, seeds)
-    if not grouped:
+    per_seed = []
+    for seed in seeds_in(dump) if seeds is None else tuple(seeds):
+        grouped = select(keys, arms, (seed,))
+        if not grouped:
+            continue
+        per_source = [
+            score(combine(dump, run_keys, orientations), truth, gen_ids, source)
+            for source, run_keys in sorted(grouped.items())
+        ]
+        per_seed.append(average(per_source, label))
+
+    if not per_seed:
         raise ValueError(f"no runs in the dump for arms={arms}, seeds={seeds}")
 
-    per_source = [
-        score(combine(dump, keys, orientations), truth, gen_ids, source)
-        for source, keys in sorted(grouped.items())
-    ]
-    return average(per_source, label)
+    folded = average(per_seed, label)
+    return folded._replace(n_sources=per_seed[0].n_sources)
 
 
-def verify_single_arms(dump, arms) -> str:
+def recorded_cells(results_dir, strategy, source, seed) -> dict[str, float]:
+    """
+    The per-cell accuracies a run is recorded as having produced.
+
+    Args:
+        results_dir: Root holding `<strategy>/<source>/seed<seed>/metrics.json`.
+        strategy: Arm name.
+        source: Generator trained on.
+        seed: Run seed.
+
+    Returns:
+        generator -> recorded accuracy.
+
+    Raises:
+        FileNotFoundError: If the run has no `metrics.json`.
+    """
+    path = Path(results_dir) / strategy / source / f"seed{seed}" / "metrics.json"
+    return json.loads(path.read_text(encoding="utf-8"))["cells"]
+
+
+def verify_single_arms(dump, arms, results_dir=DEFAULT_RESULTS_DIR) -> str:
     """
     Check that each arm alone reproduces the matrix it is recorded as producing.
 
     This is the guard that makes every other number in the file meaningful: an ensemble
-    of models that are not the reported models is not a result about this project.
+    of models that are not the reported models is not a result about this project. Each
+    checkpoint's upright, unmirrored pass is compared against its own `metrics.json`,
+    cell by cell - not arm-level means, which can agree while individual cells do not.
 
     Args:
         dump: The loaded `.npz`.
         arms: Strategies to check, each scored on its own.
+        results_dir: Where the recorded `metrics.json` files live.
 
     Returns:
         A one-line-per-arm summary for printing.
 
     Raises:
-        ValueError: If any arm's per-cell accuracy is further than
-            MAX_FLIPPED_PREDICTIONS rows from what a single-arm score should give.
+        ValueError: If any cell is further than MAX_FLIPPED_PREDICTIONS rows from its
+            recorded accuracy.
     """
+    truth = np.asarray(dump["y_test"], dtype=np.float64)
+    gen_ids = np.asarray(dump["gen_ids"]).astype(str)
+    tolerance = MAX_FLIPPED_PREDICTIONS / CELL_ROWS
+
+    drifted = []
     lines = []
     for arm in arms:
+        keys = dump.files if hasattr(dump, "files") else dump.keys()
+        for source, run_keys in sorted(select(keys, (arm,), None).items()):
+            for key in sorted(run_keys):
+                _, _, seed = split_key(key)
+                found = cell_accuracies(combine(dump, [key], (0,)), truth, gen_ids)
+                for generator, expected in recorded_cells(results_dir, arm, source, seed).items():
+                    drift = abs(found[generator] - expected)
+                    if drift > tolerance:
+                        drifted.append(
+                            f"    {arm}/{source}/seed{seed} cell {generator}: "
+                            f"{found[generator]:.4f} vs recorded {expected:.4f} "
+                            f"({round(drift * CELL_ROWS)} rows)"
+                        )
+
         single = evaluate(dump, (arm,), (0,), arm)
         lines.append(
             f"  {arm:<13}in-domain {single.in_domain:.4f}  off-domain {single.off_domain:.4f}  "
             f"({single.n_sources} sources)"
+        )
+
+    if drifted:
+        raise ValueError(
+            f"{len(drifted)} cell(s) drifted more than {MAX_FLIPPED_PREDICTIONS} rows from the "
+            f"recorded matrix - these scores are not about the reported models:\n"
+            + "\n".join(drifted)
         )
     return "\n".join(lines)
 
@@ -314,6 +423,12 @@ def _main() -> None:
     )
     parser.add_argument("--logits", required=True, type=Path, help="written by src.logits")
     parser.add_argument(
+        "--results-dir",
+        type=Path,
+        default=DEFAULT_RESULTS_DIR,
+        help="recorded metrics.json tree, checked against the upright pass",
+    )
+    parser.add_argument(
         "--arms",
         nargs="+",
         default=list(DEFAULT_ARMS),
@@ -325,11 +440,11 @@ def _main() -> None:
     dump = np.load(args.logits, allow_pickle=False)
     arms = tuple(args.arms)
     n_orient = len(dump["orientations"])
-    seeds = sorted({split_key(k)[2] for k in dump.files if is_run_key(k)})
+    seeds = seeds_in(dump)
 
-    print(f"{args.logits}: {len(seeds)} seed(s) {seeds}, {n_orient} orientations\n")
-    print("single-arm reproduction (must match the recorded matrix):")
-    print(verify_single_arms(dump, arms))
+    print(f"{args.logits}: {len(seeds)} seed(s) {list(seeds)}, {n_orient} orientations\n")
+    print("single-arm reproduction (checked against the recorded matrix, cell by cell):")
+    print(verify_single_arms(dump, arms, args.results_dir))
     print()
 
     rows = [evaluate(dump, (arm,), (0,), f"{arm} alone") for arm in arms]
