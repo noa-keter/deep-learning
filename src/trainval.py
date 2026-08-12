@@ -21,7 +21,8 @@ No retraining. Every run saved `model.pt`, and `load_arm` is seed-deterministic,
 with the same seed reproduces byte-identical training rows. Scoring reuses `train._predict`,
 so these numbers sit on exactly the same footing as the reported ones - and the recomputed
 validation accuracy must reproduce what training recorded, which is checked rather than
-assumed.
+assumed. The budget is stated in **flipped rows** rather than accuracy points: fp16 autocast
+makes a logit at the decision threshold GPU-dependent, while a wrong arm moves tens of rows.
 
 Conventions inherited from `analyze.py` and `train.py`:
 
@@ -60,10 +61,14 @@ __all__ = [
 
 DEFAULT_FIGURE_DIR: Final[Path] = Path("results/figures")
 
-#: The recomputed validation accuracy must reproduce what training recorded - same seed,
-#: same rows, same eval path. Anything above this means the arm being reloaded is not the
-#: arm that was trained on, and the train accuracy beside it describes different images.
-REPRODUCTION_TOLERANCE: Final[float] = 1e-9
+#: Flipped-prediction budget per checkpoint on the validation set.
+#:
+#: **Deliberately not zero**, for the reason spelled out in `rotation.MAX_FLIPPED_PREDICTIONS`:
+#: `_predict` runs under fp16 autocast, so a logit within rounding distance of the decision
+#: threshold lands on either side depending on which kernel cuDNN picks, and a different GPU
+#: model than the one that trained the run is enough. A wrong arm, seed or cache moves whole
+#: percent instead, which on a 400-row val set is tens of rows.
+MAX_FLIPPED_PREDICTIONS: Final[int] = 4
 
 #: Above this the network is effectively memorizing its training set, and widening it can
 #: only push train toward 1.0 without moving val.
@@ -80,35 +85,50 @@ UNDERFIT_GAP: Final[float] = 0.02
 # --------------------------------------------------------------------------- #
 
 
-def check_val_reproduction(rows: list[dict]) -> float:
+def check_val_reproduction(rows: list[dict]) -> str:
     """
     Verify that the recomputed validation accuracy matches what training recorded.
 
-    The sibling of `rotation.check_reproduction`, on a different field: there the control
-    is the k = 0 pass, here it is the validation set the checkpoint was selected on.
+    The sibling of `rotation.check_reproduction`, on a different field: there the control is
+    the k = 0 pass, here it is the validation set the checkpoint was selected on. Same unit,
+    same reasoning - drift is counted in flipped rows, not accuracy points.
 
     Args:
-        rows: Per-checkpoint result dicts as assembled by func run_train_val.
+        rows: Per-checkpoint result dicts as assembled by func run_train_val, each carrying
+            `n_val` so the drift can be converted into a row count.
 
     Returns:
-        The largest absolute drift observed.
+        A one-line summary naming the worst checkpoint, for printing.
 
     Raises:
-        ValueError: If `rows` is empty, or if any row drifts beyond REPRODUCTION_TOLERANCE.
-            A drift means the reloaded arm is not the arm that was trained on, so the train
-            accuracy beside it was measured on different images and means nothing.
+        ValueError: If `rows` is empty, or if any checkpoint differs by more than
+            MAX_FLIPPED_PREDICTIONS rows. Beyond that budget the reloaded arm is not the arm
+            that was trained on, so the train accuracy beside it was measured on different
+            images and means nothing.
     """
     if not rows:
         raise ValueError("no rows to check")
 
-    drift = max(abs(r["val_accuracy"] - r["val_recorded"]) for r in rows)
-    if drift >= REPRODUCTION_TOLERANCE:
+    counted = [(r, round(abs(r["val_accuracy"] - r["val_recorded"]) * r["n_val"])) for r in rows]
+    worst, flips = max(counted, key=lambda item: item[1])
+    exact = sum(1 for _, n in counted if n == 0)
+
+    if flips > MAX_FLIPPED_PREDICTIONS:
         raise ValueError(
-            f"validation drifts {drift:.2e} from what training recorded - the train "
-            f"accuracies are meaningless until this is explained. Check --cache-dir, "
-            f"--ckpt-root and the seed."
+            f"validation does not reproduce: {worst['strategy']}/{worst['source']}/"
+            f"seed{worst['seed']} differs by {flips} of {worst['n_val']} rows, over the "
+            f"{MAX_FLIPPED_PREDICTIONS}-row budget for fp16 nondeterminism. That is a "
+            f"different arm, seed or cache - not rounding. The train accuracies beside it "
+            f"describe different images. Check --cache-dir, --ckpt-root and --results-dir."
         )
-    return drift
+
+    if exact == len(counted):
+        return f"val reproduction: all {exact} checkpoints exact"
+    return (
+        f"val reproduction: {exact} of {len(counted)} checkpoints exact; worst "
+        f"{worst['strategy']}/{worst['source']}/seed{worst['seed']} differs by {flips} of "
+        f"{worst['n_val']} rows, within the {MAX_FLIPPED_PREDICTIONS}-row fp16 budget"
+    )
 
 
 def format_report(rows: list[dict]) -> str:
@@ -273,6 +293,9 @@ def run_train_val(
             "in_domain": recorded["in_domain"],
             "gap": train_accuracy - val_accuracy,
             "n_train": int(len(arm.x_train)),
+            # Recorded so the reproduction guard can convert a drift into a row count
+            # without assuming VAL_FRACTION never changes.
+            "n_val": int(len(arm.x_val)),
         })
         print(
             f"  {strategy:<12} {source:<11} seed{seed}  "
@@ -290,8 +313,8 @@ def run_train_val(
             f"  - the weights are the BACKUP from 01_run_matrix cell 17, not the repo tree"
         )
 
-    drift = check_val_reproduction(rows)
-    print(f"\nval reproduction check: max drift {drift:.2e}  OK")
+    print()
+    print(check_val_reproduction(rows))
     print(f"{len(rows)} checkpoints ({time.perf_counter() - started:.0f}s)")
     return rows
 

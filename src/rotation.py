@@ -29,10 +29,13 @@ Conventions inherited from `analyze.py` and `train.py`, and not to be broken her
 - **torch is imported inside the functions that need it**, so the scoring arithmetic, the
   summaries and the verdict run on a laptop that has never had torch installed. Only
   func run_gate0 and func rotate touch a GPU.
-- **The k = 0 pass must reproduce the recorded `in_domain` and `off_domain_mean` exactly.**
-  `load_arm` is seed-deterministic and this reuses `train._predict`, so a drift means the arm
-  being reloaded is not the arm that was trained on - and every rotated number computed beside
-  it would be meaningless. Checked in func check_reproduction, never assumed.
+- **The k = 0 pass must reproduce the recorded `in_domain` and `off_domain_mean`**, to within a
+  few flipped rows. `load_arm` is seed-deterministic and this reuses `train._predict`, so a
+  large drift means the arm being reloaded is not the arm that was trained on, and every
+  rotated number computed beside it would be meaningless. Checked in func check_reproduction,
+  never assumed - and the budget is stated in **flipped test rows** rather than accuracy
+  points, because fp16 autocast makes a logit at the decision threshold GPU-dependent while a
+  wrong arm moves tens of rows. See MAX_FLIPPED_PREDICTIONS.
 - **Cell accuracies are recomputed here rather than taken from `cell_accuracies`**, because the
   whole point of this diagnostic is the tpr/tnr split that the cell view averages away. The cell
   arithmetic is duplicated in exactly one place, func score_predictions, and is checked against
@@ -52,7 +55,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from src.train import DEFAULT_DEVICE, DEFAULT_RESULTS_DIR, EVAL_BATCH_SIZE, _predict, checkpoint_path
-from src.data import GENERATORS, REAL_TAG, load_arm
+from src.data import GENERATORS, REAL_TAG, TEST_PER_GENERATOR, TEST_REAL_N, load_arm
 
 if TYPE_CHECKING:
     from torch import Tensor
@@ -61,6 +64,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ROTATIONS",
     "check_reproduction",
+    "flipped_predictions",
     "format_report",
     "masked_accuracy",
     "rotate",
@@ -84,9 +88,24 @@ ROTATIONS: Final[tuple[int, ...]] = (0, 1, 2, 3)
 #: would silently mix batch or channel into the rotation and produce garbage.
 SPATIAL_DIMS: Final[tuple[int, int]] = (1, 2)
 
-#: k = 0 must reproduce training's recorded numbers bit for bit - same seed, same rows,
-#: same eval path.
-REPRODUCTION_TOLERANCE: Final[float] = 1e-9
+#: Rows behind each reported number, so drift can be expressed in flipped predictions
+#: rather than in accuracy points. A cell is one generator's fakes plus the shared real
+#: block; the off-domain mean averages the six non-source cells.
+CELL_ROWS: Final[int] = TEST_PER_GENERATOR + TEST_REAL_N
+OFF_DOMAIN_ROWS: Final[int] = (len(GENERATORS) - 1) * CELL_ROWS
+
+#: Flipped-prediction budget per checkpoint at k = 0.
+#:
+#: **This is deliberately not zero.** `_predict` runs under fp16 autocast, so a logit within
+#: rounding distance of DECISION_LOGIT lands on either side depending on which kernel cuDNN
+#: picks - and a different GPU model or driver than the one that trained the run is enough
+#: to change that. Observed in practice: one flipped row in 112,000 predictions.
+#:
+#: What the guard is actually for is a wrong arm, a wrong seed or a wrong cache, and those
+#: move accuracy by whole percent - tens of rows out of 4,000, not four. The two failure
+#: modes are three orders of magnitude apart, so this budget separates them cleanly while
+#: still refusing to average over a grid that is not the one that was trained.
+MAX_FLIPPED_PREDICTIONS: Final[int] = 4
 
 #: Verdict thresholds, in accuracy points, applied to the drop from k = 0 to the mean of
 #: k = 1, 2, 3. Below FLAT the model is already orientation-invariant and D4 has nothing to
@@ -175,7 +194,38 @@ def score_predictions(
     }
 
 
-def check_reproduction(rows: list[dict]) -> float:
+def flipped_predictions(row: dict) -> tuple[int, int]:
+    """
+    Express one k = 0 row's drift as a count of test rows predicted differently.
+
+    The two drifts are not independent, and counting them separately would double-count:
+    the real block is **shared by all seven cells**, so one changed real row moves the
+    in-domain cell and the off-domain mean by the same 1/CELL_ROWS. Only the off-domain
+    drift *in excess of* the in-domain drift can come from another generator's fakes, which
+    is what the residual below measures.
+
+    The two signatures are therefore distinguishable, and worth reading:
+
+      in-domain moves, off-domain moves by the same amount  ->  the shared real block
+      in-domain exact, off-domain moves by 1/OFF_DOMAIN_ROWS ->  one fake row of one cell
+
+    Args:
+        row: One k = 0 result dict, carrying both the measured and the recorded values.
+
+    Returns:
+        (rows changed in the source cell, rows changed in other generators' cells). A
+        conservative estimate: drifts of opposite sign can cancel, so this is a lower bound
+        on rows changed, which is the safe direction for a guard.
+    """
+    in_drift = abs(row["in_domain"] - row["in_domain_recorded"])
+    off_drift = abs(row["off_domain_mean"] - row["off_domain_recorded"])
+    return (
+        round(in_drift * CELL_ROWS),
+        round(max(0.0, off_drift - in_drift) * OFF_DOMAIN_ROWS),
+    )
+
+
+def check_reproduction(rows: list[dict]) -> str:
     """
     Verify that the k = 0 pass reproduces what training recorded.
 
@@ -183,28 +233,45 @@ def check_reproduction(rows: list[dict]) -> float:
         rows: Per-(checkpoint, rotation) result dicts, as assembled by func run_gate0.
 
     Returns:
-        The largest absolute drift observed at k = 0.
+        A one-or-two line summary of how closely the control pass reproduced, naming the
+        worst checkpoint. Printed rather than discarded, because "reproduced exactly" and
+        "reproduced within one flipped row" are different facts and the report should be
+        able to say which one happened.
 
     Raises:
-        ValueError: If no k = 0 rows are present, or if any drifts beyond
-            REPRODUCTION_TOLERANCE. A drift means the reloaded arm is not the arm that
-            was trained on, which invalidates every rotated number computed beside it.
+        ValueError: If no k = 0 rows are present, or if any checkpoint differs by more than
+            MAX_FLIPPED_PREDICTIONS rows. Beyond that budget the arm being reloaded is not
+            the arm that was trained on, and every rotated number beside it is meaningless.
     """
     upright = [r for r in rows if r["k"] == 0]
     if not upright:
         raise ValueError("no k = 0 rows; the control pass is what makes the rest meaningful")
 
-    drift = max(
-        max(abs(r["in_domain"] - r["in_domain_recorded"]),
-            abs(r["off_domain_mean"] - r["off_domain_recorded"]))
-        for r in upright
-    )
-    if drift >= REPRODUCTION_TOLERANCE:
+    counted = [(row, sum(flipped_predictions(row))) for row in upright]
+    worst, flips = max(counted, key=lambda item: item[1])
+    exact = sum(1 for _, n in counted if n == 0)
+
+    if flips > MAX_FLIPPED_PREDICTIONS:
+        source_rows, other_rows = flipped_predictions(worst)
         raise ValueError(
-            f"k = 0 drifts {drift:.2e} from the recorded matrix - the rotated numbers are "
-            f"meaningless until this is explained. Check --owner, --cache-dir and the seed."
+            f"k = 0 does not reproduce the recorded matrix: "
+            f"{worst['strategy']}/{worst['source']}/seed{worst['seed']} differs by "
+            f"{flips} test rows ({source_rows} in the source cell, {other_rows} elsewhere), "
+            f"over the {MAX_FLIPPED_PREDICTIONS}-row budget for fp16 nondeterminism. That "
+            f"is a different arm, seed or cache - not rounding. Check --cache-dir, "
+            f"--ckpt-root and that this account's runs are the ones being scored."
         )
-    return drift
+
+    if exact == len(counted):
+        return f"k=0 reproduction: all {exact} checkpoints exact"
+    source_rows, other_rows = flipped_predictions(worst)
+    return (
+        f"k=0 reproduction: {exact} of {len(counted)} checkpoints exact; worst is "
+        f"{worst['strategy']}/{worst['source']}/seed{worst['seed']} at {flips} row(s) "
+        f"({source_rows} in the source cell, {other_rows} elsewhere)\n"
+        f"  within the {MAX_FLIPPED_PREDICTIONS}-row budget: `_predict` runs under fp16 "
+        f"autocast, so a logit at the decision threshold can flip on a different GPU"
+    )
 
 
 def summarize(rows: list[dict], key: str) -> dict[int, float]:
@@ -499,8 +566,8 @@ def run_gate0(
             f"  - the weights are the BACKUP from 01_run_matrix cell 17, not the repo tree"
         )
 
-    drift = check_reproduction(rows)
-    print(f"\nk=0 reproduction check: max drift {drift:.2e}  OK")
+    print()
+    print(check_reproduction(rows))
     print(f"{len(rows) // len(ROTATIONS)} checkpoints x {len(ROTATIONS)} orientations "
           f"({time.perf_counter() - started:.0f}s)")
     return rows
