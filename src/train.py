@@ -62,9 +62,16 @@ WEIGHT_DECAY: Final[float] = 1e-4
 #: Inference only, so it is bounded by VRAM rather than by optimization.
 EVAL_BATCH_SIZE: Final[int] = 512
 
-#: The only augmentation. Every other candidate - rotation, scale jitter, color
-#: jitter, JPEG augmentation - resamples or re-encodes, which would inject the
-#: exact artifact this study measures. A methodological choice, not laziness.
+#: The only augmentation in the reported matrices. Scale jitter, arbitrary-angle
+#: rotation, random-resized-crop and JPEG augmentation all resample or re-encode,
+#: which would inject the exact artifact this study measures. A methodological
+#: choice, not laziness.
+#:
+#: One correction to an earlier version of this note: k x 90 deg rotation does NOT
+#: resample - it is an exact permutation of the pixel grid - so D4 is available at
+#: zero methodological cost. It is deliberately not enabled here: the four reported
+#: matrices stay flip-only and D4 is run as a separate ablation, so the 56 completed
+#: runs remain the control arm. See `src/rotation.py`.
 FLIP_PROBABILITY: Final[float] = 0.5
 
 #: Images arrive as uint8 and are mapped to [-1, 1] by `x / 127.5 - 1`. Kept
