@@ -17,6 +17,11 @@ import torch.nn as nn
 # The smoke test asserts this value so that cannot pass unnoticed.
 EXPECTED_PARAMS = 1_173_473
 
+# Same, for the experimental two-layer head at its default width. Adding one hidden layer of
+# 256 units costs 256*256 + 256 = 65,792 weights and replaces nothing, so the total is the
+# baseline plus that. Asserted in the smoke test for the same reason as above.
+EXPECTED_PARAMS_FC_HIDDEN_256 = EXPECTED_PARAMS + 65_792
+
 
 def _block(c_in, c_out):
     """[Conv3x3 -> BN -> ReLU] x2 -> MaxPool2: c_in -> c_out channels, spatial size halved.
@@ -42,7 +47,25 @@ class CompactCNN(nn.Module):
     forward: (B, 3, 128, 128) float32 in [-1, 1] -> (B, 1) float32 logits.
     """
 
-    def __init__(self, dropout=0.3):
+    def __init__(self, dropout=0.3, fc_hidden=None):
+        """
+        Args:
+            dropout: Dropout probability, applied to the pooled 256-vector and again
+                inside the two-layer head when `fc_hidden` is set.
+            fc_hidden: Width of an optional hidden layer in the classifier head. `None`
+                reproduces the reported architecture exactly - a single linear layer -
+                and is the default so that loading any of the 56 committed checkpoints
+                keeps working unchanged. An int adds Linear -> ReLU -> Dropout before
+                the output layer.
+
+                **Experimental.** The head sits after `AdaptiveAvgPool2d(1)`, so it sees
+                a 256-vector with all spatial structure already averaged away; capacity
+                added here cannot recover a cue the convolutions did not extract. The
+                train/val diagnostic also puts this model at 0.967-0.982 train accuracy,
+                i.e. variance-limited, where added capacity normally hurts. It is
+                therefore paired with D4 augmentation in `train.py`, which is what buys
+                the room for it - do not run it without.
+        """
         super().__init__()
 
         # Widths 32/64/128/256; spatial 128 -> 64 -> 32 -> 16 -> 8.
@@ -67,7 +90,20 @@ class CompactCNN(nn.Module):
         # Raw logit, no sigmoid: BCEWithLogitsLoss applies it internally in a numerically
         # stable way, and attribution needs the unsquashed logit -- a sigmoid flattens the
         # gradients of confident predictions, which are the ones worth looking at.
-        self.fc = nn.Linear(256, 1)
+        #
+        # The two-layer form keeps that property: only the final layer is widened into,
+        # and it is still a bare Linear. A second Dropout sits between the layers because
+        # the hidden units are the new capacity and are the thing at risk of memorizing.
+        self.fc_hidden = fc_hidden
+        if fc_hidden is None:
+            self.fc = nn.Linear(256, 1)
+        else:
+            self.fc = nn.Sequential(
+                nn.Linear(256, fc_hidden),
+                nn.ReLU(inplace=True),
+                nn.Dropout(dropout),
+                nn.Linear(fc_hidden, 1),
+            )
 
         self._init_weights()
 
@@ -120,6 +156,19 @@ def _smoke_test():
     n_params = count_parameters(model)
     assert n_params == EXPECTED_PARAMS, "got {}, expected {}".format(n_params, EXPECTED_PARAMS)
     print("params {:,} OK; forward {} OK".format(n_params, tuple(logits.shape)))
+
+    # The experimental head. Checked in the same place so a change to either form cannot
+    # land without the other being re-counted, and so the default stays provably identical
+    # to the architecture the 56 reported runs used.
+    deep = CompactCNN(fc_hidden=256)
+    deep_logits = deep(torch.randn(2, 3, 128, 128))
+    assert deep_logits.shape == (2, 1), deep_logits.shape
+    assert torch.isfinite(deep_logits).all(), "non-finite logits at init (fc_hidden)"
+    n_deep = count_parameters(deep)
+    assert n_deep == EXPECTED_PARAMS_FC_HIDDEN_256, "got {}, expected {}".format(
+        n_deep, EXPECTED_PARAMS_FC_HIDDEN_256
+    )
+    print("params {:,} OK (fc_hidden=256, +{:,})".format(n_deep, n_deep - n_params))
 
     # Memorize ten fixed examples. A model that cannot do this has a broken gradient path
     # somewhere (a detached tensor or a dead ReLU stack) which the shape check above

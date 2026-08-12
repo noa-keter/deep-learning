@@ -69,10 +69,47 @@ EVAL_BATCH_SIZE: Final[int] = 512
 #:
 #: One correction to an earlier version of this note: k x 90 deg rotation does NOT
 #: resample - it is an exact permutation of the pixel grid - so D4 is available at
-#: zero methodological cost. It is deliberately not enabled here: the four reported
-#: matrices stay flip-only and D4 is run as a separate ablation, so the 56 completed
-#: runs remain the control arm. See `src/rotation.py`.
+#: zero methodological cost. See `--d4` below and `src/rotation.py`.
 FLIP_PROBABILITY: Final[float] = 0.5
+
+#: Quarter turns drawn uniformly when `--d4` is on. With the horizontal flip above at
+#: p = 0.5 this is uniform measure over all eight elements of the dihedral group D4:
+#: four rotations x {identity, mirror}. Dropping the flip would leave C4, an arbitrary
+#: subgroup with no justification, so the two are used together or not at all.
+#:
+#: Exact by construction - `torch.rot90` is a transpose plus a reversal, so it permutes
+#: the pixel grid without interpolating and preserves the high-frequency residual that
+#: carries the generator fingerprint. That is the whole reason this one augmentation is
+#: admissible in a study about resampling.
+D4_ROTATIONS: Final[tuple[int, ...]] = (0, 1, 2, 3)
+
+#: Dropout probability on the pooled 256-vector, and again inside the two-layer head when
+#: `--fc-hidden` is set. 0.3 is what the 56 reported runs used; exposed as a flag only so
+#: the experimental branch can tune it, never for the reported matrices.
+DROPOUT: Final[float] = 0.3
+
+#: Epochs of no improvement in the selection metric before training stops.
+#:
+#: **Read this before using it.** The schedule is `CosineAnnealingLR` spanning exactly
+#: `epochs`, so the learning rate is still large in the middle of training and most of the
+#: final gain arrives as it decays to zero - `best_epoch` averaged ~33 of 40, i.e. 82 % of
+#: the way in. Aggressive patience therefore stops the run *before the schedule has
+#: delivered*, which looks like convergence and is not. Hence a deliberately generous
+#: default, and `None` (train the full budget) as the actual default in the signature.
+#:
+#: Note also that checkpoint selection is already an early-stopping mechanism in the sense
+#: the course uses (L8 slides 8-10: effective capacity controlled by how many steps the
+#: model gets to fit the training set). Every run keeps `best_state`, so the reported
+#: weights are never the last epoch's. `--patience` only adds the compute saving and the
+#: guarantee of not training long past the peak.
+DEFAULT_PATIENCE: Final[int] = 20
+
+#: Under uniform D4 only one presentation in eight is upright, so the effective dataset
+#: is 8x larger and the epoch budget that fitted the flip-only runs no longer does:
+#: `best_epoch` already averaged ~33 of 40. Running D4 at 40 epochs would confound
+#: "D4 does not help" with "undertrained under D4", which is the easiest way to run this
+#: experiment and get a wrong answer. `--d4` therefore refuses to run below this.
+D4_MIN_EPOCHS: Final[int] = 80
 
 #: Images arrive as uint8 and are mapped to [-1, 1] by `x / 127.5 - 1`. Kept
 #: character-for-character in step with `model.normalize`: training and the
@@ -382,6 +419,11 @@ def train_one(
     device: str = DEFAULT_DEVICE,
     results_dir: str | Path = DEFAULT_RESULTS_DIR,
     model_out: str | Path | None = None,
+    *,
+    d4: bool = False,
+    fc_hidden: int | None = None,
+    dropout: float = DROPOUT,
+    patience: int | None = None,
 ) -> dict[str, object]:
     """
     Train one detector on `source` and evaluate it against all seven generators.
@@ -413,6 +455,20 @@ def train_one(
             `checkpoint_path(results_dir, strategy, source, seed)`, so every run
             saves its weights without the caller having to name a file. Pass an
             explicit path to put one elsewhere.
+        d4: Add uniform k x 90 deg rotations to the horizontal flip, giving the full
+            dihedral group. **Experimental, keyword-only, and off by default** - the
+            56 reported runs are flip-only and must stay the control arm. Requires
+            `epochs >= D4_MIN_EPOCHS`.
+        fc_hidden: Width of an optional hidden layer in the classifier head; `None`
+            is the reported architecture. **Experimental, keyword-only.** Adding
+            capacity to a variance-limited model normally hurts, so this is meant to
+            be run together with `d4`, which supplies the extra effective data.
+        dropout: Dropout probability. DROPOUT reproduces the reported runs.
+        patience: Stop after this many epochs with no improvement in the selection
+            metric. `None` trains the full budget, which is what the reported runs
+            did. See DEFAULT_PATIENCE for why a small value is a trap under a cosine
+            schedule - the selected checkpoint is already the best epoch either way,
+            so this buys compute, not accuracy.
 
     Returns:
         A JSON-serializable dict with `strategy`, `source`, `seed`, `cells`
@@ -420,10 +476,19 @@ def train_one(
         `best_epoch`, `wall_clock_s`, `load_s`, `peak_vram_mb`, `checkpoint` and
         `config`.
     """
+    # Checked before torch is even imported: loading an arm costs seconds and ~390 MB of
+    # VRAM, and there is no reason to pay either for a run that cannot be interpreted.
+    if d4 and epochs < D4_MIN_EPOCHS:
+        raise ValueError(
+            f"d4 needs at least {D4_MIN_EPOCHS} epochs, got {epochs}. Under uniform D4 only one "
+            f"presentation in eight is upright, and best_epoch already averaged ~33 of 40 without "
+            f"it - at this budget a null result would be indistinguishable from undertraining."
+        )
+
     import torch
     from torch.nn import functional as F
 
-    from src.model import CompactCNN
+    from src.model import CompactCNN, count_parameters
 
     started = time.perf_counter()
     device_type = _device_type(device)
@@ -446,7 +511,7 @@ def train_one(
         flush=True,
     )
 
-    model = CompactCNN().to(device)
+    model = CompactCNN(dropout=dropout, fc_hidden=fc_hidden).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=0.0)
     scaler = torch.amp.GradScaler(device_type, enabled=use_amp)
@@ -465,7 +530,20 @@ def train_one(
         for start in range(0, len(perm), batch_size):
             index = perm[start : start + batch_size]
             batch = _normalize(arm.x_train[index])
-            # The only augmentation. dims=[3] is width in NCHW - a horizontal flip.
+            if d4:
+                # Quarter turns first, flip second: applied to every sample the two
+                # together generate all eight elements of D4 uniformly, and the order
+                # does not matter for that. dims=[2, 3] are H and W in NCHW - rotating
+                # any other pair would mix batch or channel into the rotation.
+                #
+                # Grouped by k rather than per-sample: three masked `rot90` calls beat
+                # 128 individual ones, and `rot90` needs a single k for the whole tensor.
+                turns = torch.randint(len(D4_ROTATIONS), (len(index),), device=device)
+                for k in D4_ROTATIONS[1:]:
+                    mask = turns == k
+                    if mask.any():
+                        batch[mask] = torch.rot90(batch[mask], k, dims=[2, 3])
+            # dims=[3] is width in NCHW - a horizontal flip.
             flip = torch.rand(len(index), device=device) < FLIP_PROBABILITY
             batch[flip] = torch.flip(batch[flip], dims=[3])
             with torch.autocast(device_type, dtype=torch.float16, enabled=use_amp):
@@ -494,6 +572,18 @@ def train_one(
                 f"val_acc {val_accuracy:.4f}  val_loss {val_loss:.4f}",
                 flush=True,
             )
+        # Early stopping. Placed after the checkpoint update, so the epoch that triggers
+        # the stop has already had its chance to become `best_state` - and `best_state` is
+        # what gets evaluated regardless, so stopping can only cost epochs, never the
+        # selection. `stopped_epoch` is recorded below; if it is far below `epochs` on a
+        # cosine schedule, suspect the patience rather than convergence.
+        if patience is not None and epoch - best_epoch >= patience:
+            print(
+                f"[train]   early stop at epoch {epoch + 1}/{epochs}: "
+                f"{patience} epochs since the best (epoch {best_epoch + 1})",
+                flush=True,
+            )
+            break
 
     # Every reported number comes from the selected checkpoint, never the last.
     model.load_state_dict(best_state)
@@ -537,7 +627,18 @@ def train_one(
             "optimizer": "AdamW",
             "scheduler": "CosineAnnealingLR(eta_min=0)",
             "loss": "binary_cross_entropy_with_logits",
-            "augmentation": "horizontal_flip_p0.5",
+            # Recorded rather than implied: these two fields are what tells an
+            # experimental run apart from one of the reported 56, in a file that
+            # otherwise looks identical.
+            "augmentation": "D4_uniform_x_horizontal_flip_p0.5" if d4 else "horizontal_flip_p0.5",
+            "fc_hidden": fc_hidden,
+            "architecture": "CompactCNN" if fc_hidden is None else f"CompactCNN(fc_hidden={fc_hidden})",
+            "n_params": count_parameters(model),
+            "dropout": dropout,
+            "patience": patience,
+            # How many epochs actually ran. Equal to `epochs` unless early stopping fired,
+            # and the pair is what tells "converged" apart from "stopped too soon".
+            "stopped_epoch": epoch + 1,
             "normalization": "uint8/255 -> (x - 0.5) / 0.5",
             "train_per_class": train_per_class,
             "n_train": int(len(arm.x_train)),
@@ -588,7 +689,51 @@ def _main() -> None:
         help=f"where to save the selected weights (default: {CHECKPOINT_NAME} beside metrics.json)",
     )
     parser.add_argument("--force", action="store_true", help="re-run even if metrics.json exists")
+    parser.add_argument(
+        "--d4",
+        action="store_true",
+        help=f"add uniform k x 90 deg rotations to the flip (full D4). EXPERIMENTAL; "
+             f"requires --epochs >= {D4_MIN_EPOCHS} and a --results-dir outside the reported tree",
+    )
+    parser.add_argument(
+        "--fc-hidden",
+        type=int,
+        default=None,
+        help="width of a hidden layer in the classifier head. EXPERIMENTAL; default is the "
+             "reported single-linear head. Meant to be used together with --d4",
+    )
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        default=DROPOUT,
+        help=f"dropout probability (default {DROPOUT}, as in the reported runs). With "
+             f"--fc-hidden it also applies between the two head layers",
+    )
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=None,
+        help=f"early stopping: stop after this many epochs with no improvement. Default is "
+             f"off (train the full budget, as the reported runs did). {DEFAULT_PATIENCE} is a "
+             f"sane value; anything small fights the cosine schedule, which delivers most of "
+             f"its gain as the LR decays to zero",
+    )
     args = parser.parse_args()
+
+    # An experimental run that lands in `results/runs` would be indistinguishable from one of
+    # the reported 56 in every listing, glob and figure, and `analyze.py` would silently average
+    # it into the matrices. The metrics file records the config, but nothing reads it before
+    # globbing - so the separation has to be enforced here, at the only point that knows both.
+    if (args.d4 or args.fc_hidden is not None) and args.results_dir == DEFAULT_RESULTS_DIR:
+        parser.error(
+            f"experimental flags refuse to write to the reported tree ({DEFAULT_RESULTS_DIR}). "
+            f"Pass --results-dir results/runs_d4 (or similar) so these runs can never be mixed "
+            f"into the 56 that the report's matrices are built from."
+        )
+    # Duplicated from `train_one` so a mistyped batch fails on the first run rather than
+    # after the arm load, and identically so the two can never disagree.
+    if args.d4 and args.epochs < D4_MIN_EPOCHS:
+        parser.error(f"--d4 needs --epochs >= {D4_MIN_EPOCHS}, got {args.epochs}")
 
     out = metrics_path(args.results_dir, args.strategy, args.source, args.seed)
     # The whole resume mechanism, and the same condition the matrix driver uses.
@@ -609,6 +754,10 @@ def _main() -> None:
         device=args.device,
         results_dir=args.results_dir,
         model_out=args.model_out,
+        d4=args.d4,
+        fc_hidden=args.fc_hidden,
+        dropout=args.dropout,
+        patience=args.patience,
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, indent=2), encoding="utf-8")
