@@ -224,7 +224,7 @@ class Attribution(NamedTuple):
         n_images: Images averaged per tag.
     """
 
-    label: str
+    strategy: str
     source: str
     seed: int
     maps: dict[str, np.ndarray]
@@ -873,7 +873,7 @@ def mean_attribution(attributions: list[Attribution]) -> dict[str, dict[str, np.
     out: dict[str, dict[str, list[np.ndarray]]] = {}
     for item in attributions:
         for tag, saliency in item.maps.items():
-            out.setdefault(item.label, {}).setdefault(tag, []).append(saliency)
+            out.setdefault(item.strategy, {}).setdefault(tag, []).append(saliency)
     return {
         label: {tag: np.mean(stack, axis=0) for tag, stack in tags.items()}
         for label, tags in out.items()
