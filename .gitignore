@@ -233,3 +233,6 @@ shards/
 
 # Local editor/tool configuration - machine-specific, not part of the project.
 .claude/
+
+# Office lock files (created while a .docx/.pptx is open; never a deliverable)
+~$*

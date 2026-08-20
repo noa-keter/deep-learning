@@ -6,8 +6,8 @@ Detectors of AI-generated images score almost perfectly on the generator they tr
 degrade sharply on unseen generators. In GenImage-style benchmarks each generator emits one
 fixed image size while real photographs vary, so image dimensions alone identify both the
 class and the generator. On this data a rule with **zero parameters** ("predict synthetic if
-the image is square") reaches **0.977** accuracy on every source/target pair, beating three of
-our four trained detectors cross-generator.
+the image is square") reaches **0.977** accuracy on every source/target pair — higher than the
+cross-generator accuracy of every one of our four trained detectors.
 
 Removing that cue is not neutral. This project makes **the correction itself the experimental
 variable**: one architecture, one dataset, one protocol, and four ways of equalizing image

@@ -284,16 +284,42 @@ Description · `pip install -r requirements.txt` · the cache-build command · t
 command for one cell · the loop that reproduces all 28 · where metrics land · results table inline.
 Check that `results/` is committed and `cache/` is not. Verify a clean clone runs.
 
-### Evening — deck, as far as it gets
+### Evening — deck  ·  DONE 2026-08-20
 
-12–14 slides: title · **the shortcut** (a real photo beside a 512² fake — "the size alone tells you")
-· the baseline number, which should land as a shock · the question: does the fix change the answer? ·
-data · the four strategies, one visual row each · model and protocol · the matrices ·
-**the ranking table, the money slide** · attribution · spectra · limitations · contributions + repo.
+`docs/final_presentation.pptx` — **19 slides: 15 content + 4 backup**, built from the frozen
+report v3. Rebuild with `python docs/slide_figures.py && python docs/build_deck.py`.
 
-The deck may finish after 11 Aug — the presentation date is set by the course and is separate.
-Rehearse against a clock before the real thing; overrunning 15 minutes is the easiest way to lose
-points on a good talk.
+**Speaking split, settled and not to be reopened: Ido slides 1–8 (6:00), Noa slides 9–15 (7:05),
+one handover** at the method/results boundary. The instructions PDF requires both members to
+present, so this is graded; presenter names are printed on every slide and repeated in the notes.
+
+Running order and budget, 13:05 total against the 15:00 cap:
+
+| # | Slide | Who | Time |
+|---|---|---|---|
+| 1 | Title | Ido | 0:15 |
+| 2 | The in-domain / cross-generator gap | Ido | 0:45 |
+| 3 | The size confound + the 0.977 zero-parameter rule | Ido | 1:05 |
+| 4 | We make the correction the variable | Ido | 0:35 |
+| 5 | Related work — Wang, GenImage, Grommelt | Ido | 0:45 |
+| 6 | Data — Tiny-GenImage, splits, balance | Ido | 0:45 |
+| 7 | The four equalization strategies (diagram) | Ido | 0:55 |
+| 8 | Model, hyperparameters, 56 runs | Ido | 0:55 |
+| 9 | The two zero-parameter baselines | **Noa** | 0:40 |
+| 10 | The four transfer matrices | Noa | 1:05 |
+| 11 | **Headline — the ranking does not survive** | Noa | 1:25 |
+| 12 | pad scores highest and that is the failure | Noa | 0:55 |
+| 13 | Attribution — border mass | Noa | 0:50 |
+| 14 | Capacity control + spectra | Noa | 1:00 |
+| 15 | Summary, insights, limitations, repo | Noa | 1:10 |
+| B1–B4 | Backup: hyperparameters · ADM anomaly · baseline matrices · full spectra | — | — |
+
+The 1:55 of slack is deliberate: live delivery runs slower than rehearsal, and
+`יש להקפיד על עמידה במסגרת הזמן` is explicit in the instructions. **Rehearse against a clock** —
+if a run lands over 13:30, cut slide 5 to a single sentence and fold slide 14's spectra half into
+the notes; both are recoverable from the backup slides under questioning.
+
+The presentation date is set by the course and is still unknown — do not invent one.
 
 **🎯 Tuesday is done when the report PDF is ≤5 pages, covers all ten components, and is pushed.**
 
